@@ -151,36 +151,107 @@ jobs:
           $proc = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TYPE=full',("/LOG=`"$setupLog`"")) -Wait -PassThru
           Write-Host "Setup exit code: $($proc.ExitCode)"
           if ($proc.ExitCode -ne 0) { throw "Actual installer failed with exit code $($proc.ExitCode)." }
+          Start-Sleep -Seconds 10
 
-      - name: Validate installed services, API, login and recorder registration
-        if: steps.installtest.outcome == 'success'
+      - name: Validate PostgreSQL service
+        if: always() && steps.installtest.outcome == 'success'
         shell: pwsh
         run: |
-          foreach ($name in @('FVR PostgreSQL 18','FVR Management Server','FVR Recording Server')) {
-            $svc = Get-Service -Name $name -ErrorAction Stop
-            Write-Host "$name = $($svc.Status)"
-            if ($svc.Status -ne 'Running') { throw "$name is not running." }
-          }
+          $svc = Get-Service -Name 'FVR PostgreSQL 18' -ErrorAction Stop
+          Write-Host "FVR PostgreSQL 18 = $($svc.Status)"
+          if ($svc.Status -ne 'Running') { throw 'FVR PostgreSQL 18 is not running.' }
 
+      - name: Validate Management Server service
+        if: always() && steps.installtest.outcome == 'success'
+        shell: pwsh
+        run: |
+          $svc = Get-Service -Name 'FVR Management Server' -ErrorAction Stop
+          Write-Host "FVR Management Server = $($svc.Status)"
+          if ($svc.Status -ne 'Running') { throw 'FVR Management Server is not running.' }
+
+      - name: Validate Recording Server service
+        if: always() && steps.installtest.outcome == 'success'
+        shell: pwsh
+        run: |
+          $svc = Get-Service -Name 'FVR Recording Server' -ErrorAction Stop
+          Write-Host "FVR Recording Server = $($svc.Status)"
+          if ($svc.Status -ne 'Running') { throw 'FVR Recording Server is not running.' }
+
+      - name: Validate Management health endpoint
+        if: always() && steps.installtest.outcome == 'success'
+        shell: pwsh
+        run: |
           $health = Invoke-RestMethod 'http://127.0.0.1:5000/health' -TimeoutSec 8
-          if ($health.status -ne 'ok' -or $health.version -ne '4.0.3') { throw "Management health/version invalid." }
+          Write-Host ($health | ConvertTo-Json -Compress)
+          if ($health.status -ne 'ok') { throw 'Management health is not OK.' }
+          if ($health.version -ne '4.0.3') { throw "Unexpected Management version: $($health.version)" }
 
+      - name: Validate admin login
+        if: always() && steps.installtest.outcome == 'success'
+        shell: pwsh
+        run: |
           $body = @{username='admin';password='FVR@2026!'} | ConvertTo-Json
           $login = Invoke-RestMethod 'http://127.0.0.1:5000/api/auth/login' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 8
-          if (-not $login.accessToken) { throw "Admin login failed." }
-          $headers = @{Authorization="Bearer $($login.accessToken)"}
+          if (-not $login.accessToken) { throw 'Admin login did not return accessToken.' }
+          $login.accessToken | Set-Content "$env:RUNNER_TEMP\fvr-token.txt" -Encoding ascii
+          Write-Host 'Admin login = OK'
+
+      - name: Validate Recording Server registration
+        if: always() && steps.installtest.outcome == 'success'
+        shell: pwsh
+        run: |
+          $token = Get-Content "$env:RUNNER_TEMP\fvr-token.txt" -Raw
+          $headers = @{Authorization="Bearer $($token.Trim())"}
           $servers = @(Invoke-RestMethod 'http://127.0.0.1:5000/api/recordingservers' -Headers $headers -TimeoutSec 8)
           $rec = $servers | Where-Object {$_.hostname -eq $env:COMPUTERNAME} | Select-Object -First 1
-          if (-not $rec) { throw "Local Recording Server was not registered." }
-          if ($rec.status -ne 'online') { throw "Local Recording Server is not online." }
+          if (-not $rec) { throw 'Local Recording Server was not registered.' }
+          Write-Host ($rec | ConvertTo-Json -Compress)
+          [string]$rec.id | Set-Content "$env:RUNNER_TEMP\fvr-recorder-id.txt" -Encoding ascii
 
-          $cfg = Get-Content 'C:\Program Files\FVR VMS\RecordingServer\appsettings.json' -Raw | ConvertFrom-Json
-          if ([string]$cfg.RecordingServer.RecordingServerId -eq '00000000-0000-0000-0000-000000000000') { throw "Recorder ID was not configured." }
-          if ([string]$cfg.RecordingServer.ApiKey -like 'CHANGE_ME*') { throw "Recorder API key was not configured." }
-          if (-not (Test-Path 'C:\Program Files\FVR VMS\MonitoringClient\FVR.MonitoringClient.exe')) { throw "Monitoring Client missing after install." }
+      - name: Validate Recording Server online status
+        if: always() && steps.installtest.outcome == 'success'
+        shell: pwsh
+        run: |
+          $token = Get-Content "$env:RUNNER_TEMP\fvr-token.txt" -Raw
+          $id = (Get-Content "$env:RUNNER_TEMP\fvr-recorder-id.txt" -Raw).Trim()
+          $headers = @{Authorization="Bearer $($token.Trim())"}
+          $servers = @(Invoke-RestMethod 'http://127.0.0.1:5000/api/recordingservers' -Headers $headers -TimeoutSec 8)
+          $rec = $servers | Where-Object {[string]$_.id -eq $id} | Select-Object -First 1
+          if (-not $rec) { throw 'Local Recording Server disappeared from Management Server.' }
+          Write-Host "Recording Server status = $($rec.status), lastHeartbeat = $($rec.lastHeartbeat)"
+          if ($rec.status -ne 'online') { throw 'Local Recording Server is not online.' }
+
+      - name: Validate Recording Server configuration
+        if: always() && steps.installtest.outcome == 'success'
+        shell: pwsh
+        run: |
+          $configPath = 'C:\Program Files\FVR VMS\RecordingServer\appsettings.json'
+          if (-not (Test-Path $configPath)) { throw "Recorder config missing: $configPath" }
+          $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
+          Write-Host "Recorder ID = $($cfg.RecordingServer.RecordingServerId)"
+          Write-Host "Management URL = $($cfg.RecordingServer.ManagementServerUrl)"
+          if ([string]$cfg.RecordingServer.RecordingServerId -eq '00000000-0000-0000-0000-000000000000') { throw 'Recorder ID was not configured.' }
+          if ([string]$cfg.RecordingServer.ApiKey -like 'CHANGE_ME*') { throw 'Recorder API key was not configured.' }
+          if ([string]::IsNullOrWhiteSpace([string]$cfg.RecordingServer.ApiKey)) { throw 'Recorder API key is blank.' }
+
+      - name: Validate Monitoring Client files
+        if: always() && steps.installtest.outcome == 'success'
+        shell: pwsh
+        run: |
+          $client = 'C:\Program Files\FVR VMS\MonitoringClient\FVR.MonitoringClient.exe'
+          if (-not (Test-Path $client)) { throw "Monitoring Client missing: $client" }
+          $cfgPath = 'C:\Program Files\FVR VMS\MonitoringClient\appsettings.json'
+          if (-not (Test-Path $cfgPath)) { throw 'Monitoring Client appsettings.json missing.' }
+          $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+          Write-Host "Monitoring Client ManagementServerUrl = $($cfg.ManagementServerUrl)"
+
+      - name: Validate Management TCP port 5000
+        if: always() && steps.installtest.outcome == 'success'
+        shell: pwsh
+        run: |
           $listener = Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction Stop | Select-Object -First 1
-          Write-Host "Port 5000 listening PID=$($listener.OwningProcess)"
-          Write-Host "ACTUAL INSTALL TEST PASSED."
+          if (-not $listener) { throw 'Port 5000 has no listener.' }
+          Write-Host "Port 5000 listening PID=$($listener.OwningProcess) address=$($listener.LocalAddress)"
 
       - name: Upload actual installation diagnostics
         if: always()
@@ -194,10 +265,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Fail if actual installer test failed
-        if: steps.installtest.outcome == 'failure'
+      - name: Fail if actual installer execution failed
+        if: always() && steps.installtest.outcome == 'failure'
         shell: pwsh
-        run: throw "FVR VMS 4.0.3 actual Setup.exe installation test failed."
+        run: throw 'FVR VMS 4.0.3 actual Setup.exe execution failed.'
 
       - name: Verify generated installer
         shell: pwsh
