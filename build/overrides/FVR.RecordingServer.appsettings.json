@@ -1,0 +1,22 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  "RecordingServer": {
+    "ManagementServerUrl": "http://localhost:5000",
+    "RecordingServerId": "00000000-0000-0000-0000-000000000000",
+    "ApiKey": "CHANGE_ME_apikey_gerada_no_cadastro_do_servidor",
+    "HeartbeatIntervalSeconds": 15,
+    "CameraSyncIntervalSeconds": 30,
+    "FfmpegPath": "C:\\Program Files\\FVR VMS\\bin\\ffmpeg.exe",
+    "SegmentDurationSeconds": 300,
+    "UseGpuDecoding": false,
+    "GpuHwaccel": "d3d11va",
+    "StoragePaths": [
+      { "Path": "C:\\ProgramData\\FVR VMS\\Recordings", "Priority": 1, "MinFreeGb": 20 }
+    ]
+  }
+}
