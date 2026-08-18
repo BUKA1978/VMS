@@ -1,9 +1,7 @@
-name: Build FVR VMS Windows + MSI
+name: Build Current FVR VMS Windows Installer
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
 
@@ -19,75 +17,103 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Rebuild source archive
+      - name: Reconstruct exact uploaded ZIP
         shell: pwsh
         run: |
-          $parts = 0..3 | ForEach-Object { Get-Content ".\archive.part$_.b64" -Raw }
+          $parts = 0..4 | ForEach-Object { Get-Content ".\current.part$_.b64" -Raw }
           $base64 = ($parts -join "")
-          [IO.File]::WriteAllBytes("project.tar.xz", [Convert]::FromBase64String($base64))
-          tar -xf project.tar.xz
-          if (-not (Test-Path ".\FVR-VMS-Etapa10-WindowsNative\FVR.VMS.Etapa10.sln")) {
-            throw "Source archive reconstruction failed."
+          [IO.File]::WriteAllBytes("FVR-VMS-current.zip", [Convert]::FromBase64String($base64))
+          $hash = (Get-FileHash ".\FVR-VMS-current.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "ZIP SHA-256: $hash"
+          if ($hash -ne "c7f38fc080305639a1ce98e4918dac9570ca88f522dc67a7a71a5576efb69a5c") {
+            throw "Uploaded ZIP checksum mismatch."
+          }
+          Expand-Archive ".\FVR-VMS-current.zip" -DestinationPath ".\current-src" -Force
+          if (-not (Test-Path ".\current-src\FVR-VMS\installer\build-all.ps1")) {
+            throw "FVR VMS source extraction failed."
           }
 
-      - name: Setup .NET from global.json
+      - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: FVR-VMS-Etapa10-WindowsNative/global.json
+          dotnet-version: '8.0.x'
 
-      - name: Verify SDK
+      - name: Verify .NET SDK
         shell: pwsh
         run: |
           dotnet --info
           dotnet --version
 
-      - name: Restore
-        working-directory: FVR-VMS-Etapa10-WindowsNative
-        shell: pwsh
-        run: dotnet restore .\FVR.VMS.Etapa10.sln
-
-      - name: Build solution
-        working-directory: FVR-VMS-Etapa10-WindowsNative
-        shell: pwsh
-        run: dotnet build .\FVR.VMS.Etapa10.sln -c Release --no-restore
-
-      - name: Publish Windows applications
-        working-directory: FVR-VMS-Etapa10-WindowsNative
-        shell: pwsh
-        run: .\scripts\Build-Windows.ps1
-
-      - name: Install WiX CLI
+      - name: Make Management Server Windows-service compatible
         shell: pwsh
         run: |
-          dotnet tool install --global wix
-          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $root = Join-Path $PWD "current-src\FVR-VMS"
+          $project = Join-Path $root "FVR.ManagementServer\FVR.ManagementServer.csproj"
+          dotnet add $project package Microsoft.Extensions.Hosting.WindowsServices --version 8.0.0
 
-      - name: Build MSI
-        working-directory: FVR-VMS-Etapa10-WindowsNative
+          $programPath = Join-Path $root "FVR.ManagementServer\Program.cs"
+          $program = Get-Content $programPath -Raw
+          $needle = 'var builder = WebApplication.CreateBuilder(args);'
+          if (-not $program.Contains($needle)) { throw "Management Server Program.cs patch point not found." }
+          $replacement = "var builder = WebApplication.CreateBuilder(args);`r`nbuilder.Services.AddWindowsService(options => options.ServiceName = `"FVR Management Server`" );"
+          $program = $program.Replace($needle, $replacement)
+          Set-Content $programPath $program -Encoding utf8
+
+      - name: Fix installer metadata
         shell: pwsh
         run: |
-          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
-          .\scripts\Build-Installer.ps1
+          $issPath = Join-Path $PWD "current-src\FVR-VMS\installer\FVR-VMS.iss"
+          $iss = Get-Content $issPath -Raw
+          $iss = $iss.Replace('AppId={{B4C1F6A0-9F2E-4B7A-9C1D-FVRVMS40000}}', 'AppId={{B4C1F6A0-9F2E-4B7A-9C1D-F40000040000}}')
+          $iss = $iss.Replace('#define MyAppPublisher "Sua Empresa"', '#define MyAppPublisher "FVR"')
+          Set-Content $issPath $iss -Encoding utf8
 
-      - name: List generated binaries
-        working-directory: FVR-VMS-Etapa10-WindowsNative
+      - name: Publish Management, Recording and Monitoring Client
+        working-directory: current-src/FVR-VMS
+        shell: pwsh
+        run: .\installer\build-all.ps1
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer EXE
         shell: pwsh
         run: |
-          Get-ChildItem .\release -Recurse -Filter *.exe | Select-Object FullName,Length | Format-Table -AutoSize
-          Get-ChildItem .\installer\output -Filter *.msi | Select-Object FullName,Length | Format-Table -AutoSize
+          $root = Join-Path $PWD "current-src\FVR-VMS"
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found after Inno Setup installation." }
+          & $iscc (Join-Path $root "installer\FVR-VMS.iss")
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed with exit code $LASTEXITCODE." }
 
-      - name: Upload Windows executables
+      - name: Verify generated installer
+        shell: pwsh
+        run: |
+          $setup = ".\current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.0-Setup.exe"
+          if (-not (Test-Path $setup)) { throw "Installer EXE was not generated." }
+          Get-Item $setup | Select-Object FullName, Length | Format-List
+          Get-FileHash $setup -Algorithm SHA256 | Format-List
+          Get-ChildItem ".\current-src\FVR-VMS\publish" -Recurse -Filter *.exe | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-Etapa10-Windows-x64
-          path: FVR-VMS-Etapa10-WindowsNative/release/**
+          name: FVR-VMS-4.0.0-Setup
+          path: current-src/FVR-VMS/publish/installer-output/FVR-VMS-4.0.0-Setup.exe
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload MSI
+      - name: Upload published applications
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-Etapa10-MSI-x64
-          path: FVR-VMS-Etapa10-WindowsNative/installer/output/*.msi
+          name: FVR-VMS-4.0.0-Windows-x64
+          path: |
+            current-src/FVR-VMS/publish/ManagementServer/**
+            current-src/FVR-VMS/publish/RecordingServer/**
+            current-src/FVR-VMS/publish/MonitoringClient/**
           if-no-files-found: error
           retention-days: 7
