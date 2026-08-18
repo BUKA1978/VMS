@@ -6,7 +6,7 @@
     }
   },
   "RecordingServer": {
-    "ManagementServerUrl": "http://localhost:5000",
+    "ManagementServerUrl": "http://127.0.0.1:5000",
     "RecordingServerId": "00000000-0000-0000-0000-000000000000",
     "ApiKey": "CHANGE_ME_apikey_gerada_no_cadastro_do_servidor",
     "HeartbeatIntervalSeconds": 15,
