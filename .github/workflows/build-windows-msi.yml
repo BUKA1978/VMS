@@ -20,10 +20,33 @@ jobs:
       - name: Rebuild and verify full source
         shell: pwsh
         run: |
-          $parts = 0..15 | ForEach-Object {
-            $p = ".\ci\final\part{0:D2}.b64" -f $_
-            if (-not (Test-Path $p)) { throw "Missing source part: $p" }
-            Get-Content $p -Raw
+          $paths = @(
+            ".\ci\final\part00.b64",
+            ".\ci\final\part01.b64",
+            ".\ci\final\part02.b64",
+            ".\ci\final\fix03-0.b64",
+            ".\ci\final\fix03-1.b64",
+            ".\ci\final\fix03-2.b64",
+            ".\ci\final\fix03-3.b64",
+            ".\ci\final\fix04-0.b64",
+            ".\ci\final\fix04-1.b64",
+            ".\ci\final\fix04-2.b64",
+            ".\ci\final\fix04-3.b64",
+            ".\ci\final\part05.b64",
+            ".\ci\final\part06.b64",
+            ".\ci\final\part07.b64",
+            ".\ci\final\part08.b64",
+            ".\ci\final\part09.b64",
+            ".\ci\final\part10.b64",
+            ".\ci\final\part11.b64",
+            ".\ci\final\part12.b64",
+            ".\ci\final\part13.b64",
+            ".\ci\final\part14.b64",
+            ".\ci\final\part15.b64"
+          )
+          $parts = $paths | ForEach-Object {
+            if (-not (Test-Path $_)) { throw "Missing source part: $_" }
+            Get-Content $_ -Raw
           }
           $base64 = ($parts -join "")
           [IO.File]::WriteAllBytes("project.tar.xz", [Convert]::FromBase64String($base64))
