@@ -53,6 +53,23 @@ jobs:
             throw "FVR VMS source extraction failed."
           }
 
+      - name: Inspect authentication and database bootstrap sources
+        shell: pwsh
+        run: |
+          $root = Join-Path $PWD "current-src\FVR-VMS"
+          foreach ($rel in @(
+            'FVR.ManagementServer\Controllers\AuthController.cs',
+            'FVR.ManagementServer\Models\Entities.cs',
+            'FVR.ManagementServer\Data\AppDbContext.cs',
+            'FVR.ManagementServer\Program.cs',
+            'FVR.ManagementServer\appsettings.json',
+            'database\001_init_schema.sql',
+            'installer\FVR-VMS.iss'
+          )) {
+            Write-Host "===== $rel ====="
+            Get-Content (Join-Path $root $rel) -Raw
+          }
+
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
