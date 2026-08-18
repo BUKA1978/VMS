@@ -45,7 +45,7 @@ jobs:
             throw "Source archive checksum mismatch on Windows runner."
           }
           New-Item -ItemType Directory -Path ".\current-src" -Force | Out-Null
-          tar -tf ".\FVR-VMS-current.tar.xz" | Select-Object -First 10
+          tar -tf ".\FVR-VMS-current.tar.xz" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Source archive integrity check failed." }
           tar -xf ".\FVR-VMS-current.tar.xz" -C ".\current-src"
           if ($LASTEXITCODE -ne 0) { throw "Source archive extraction failed." }
