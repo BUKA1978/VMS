@@ -24,7 +24,8 @@ jobs:
             ".\source.part0.b64",
             ".\source.part1a.b64",
             ".\source.part1b.b64",
-            ".\source.part2.b64",
+            ".\source.part2a.b64",
+            ".\source.part2b.b64",
             ".\source.part3.b64",
             ".\source.part4.b64",
             ".\source.part5.b64",
@@ -34,7 +35,7 @@ jobs:
           [IO.File]::WriteAllBytes("FVR-VMS-current.tar.xz", [Convert]::FromBase64String($base64))
           $hash = (Get-FileHash ".\FVR-VMS-current.tar.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Host "Source archive SHA-256: $hash"
-          if ($hash -ne "47eebd03ff2885dd28d34455fb6762e037b0c9b9edee4552a51af3dfe8c129e1") {
+          if ($hash -ne "a64f620207cd3ac53465b74e2dad14e041d856835dc6c84049b0fb9e30afad8d") {
             throw "Source archive checksum mismatch."
           }
           New-Item -ItemType Directory -Path ".\current-src" -Force | Out-Null
