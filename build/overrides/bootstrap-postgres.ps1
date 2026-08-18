@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$AppRoot,
-    [Parameter(Mandatory = $true)][string]$DataDir
+    [Parameter(Mandatory = $true)][string]$DataDir,
+    [switch]$NoService
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,15 +47,25 @@ shared_buffers = '256MB'
 "@
 }
 
-$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if (-not $service) {
-    & $PgCtl register -N $ServiceName -D $DataDir -S auto
-    if ($LASTEXITCODE -ne 0) { throw "Falha ao registrar o serviço $ServiceName" }
+if ($NoService) {
+    & $PgIsReady -h 127.0.0.1 -p $Port -U postgres | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        $logFile = Join-Path (Split-Path $DataDir -Parent) 'postgresql.log'
+        & $PgCtl start -D $DataDir -l $logFile -w
+        if ($LASTEXITCODE -ne 0) { throw 'Falha ao iniciar PostgreSQL em modo de teste.' }
+    }
 }
+else {
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $service) {
+        & $PgCtl register -N $ServiceName -D $DataDir -S auto
+        if ($LASTEXITCODE -ne 0) { throw "Falha ao registrar o serviço $ServiceName" }
+    }
 
-$service = Get-Service -Name $ServiceName -ErrorAction Stop
-if ($service.Status -ne 'Running') {
-    Start-Service -Name $ServiceName
+    $service = Get-Service -Name $ServiceName -ErrorAction Stop
+    if ($service.Status -ne 'Running') {
+        Start-Service -Name $ServiceName
+    }
 }
 
 $ready = $false
