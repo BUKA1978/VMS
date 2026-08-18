@@ -25,7 +25,7 @@ public partial class App : System.Windows.Application
             .Build();
 
         var services = new ServiceCollection();
-        var managementServerUrl = config["ManagementServerUrl"] ?? "http://localhost:5000";
+        var managementServerUrl = config["ManagementServerUrl"] ?? "http://127.0.0.1:5000";
 
         services.AddSingleton(new ApiClient(managementServerUrl));
         services.AddSingleton<SessionService>();
