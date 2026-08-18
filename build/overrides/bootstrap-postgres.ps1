@@ -22,10 +22,16 @@ foreach ($exe in @($InitDb, $PgCtl, $PgIsReady, $Psql)) {
 }
 if (-not (Test-Path $SchemaFile)) { throw "Schema do FVR VMS não encontrado: $SchemaFile" }
 
-New-Item -ItemType Directory -Force -Path (Split-Path $DataDir -Parent) | Out-Null
+$parentDir = Split-Path $DataDir -Parent
+New-Item -ItemType Directory -Force -Path $parentDir | Out-Null
 
 if (-not (Test-Path (Join-Path $DataDir 'PG_VERSION'))) {
-    New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+    if (Test-Path $DataDir) {
+        $existing = @(Get-ChildItem $DataDir -Force -ErrorAction SilentlyContinue)
+        if ($existing.Count -gt 0) { throw "Diretório PostgreSQL existe mas não contém cluster válido: $DataDir" }
+        Remove-Item $DataDir -Force -ErrorAction SilentlyContinue
+    }
+
     $pwFile = Join-Path $env:TEMP 'fvr_pg_superuser_password.txt'
     [IO.File]::WriteAllText($pwFile, $SuperPassword, (New-Object System.Text.UTF8Encoding($false)))
     try {
@@ -50,7 +56,7 @@ shared_buffers = '256MB'
 if ($NoService) {
     & $PgIsReady -h 127.0.0.1 -p $Port -U postgres | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        $logFile = Join-Path (Split-Path $DataDir -Parent) 'postgresql.log'
+        $logFile = Join-Path $parentDir 'postgresql.log'
         & $PgCtl start -D $DataDir -l $logFile -w
         if ($LASTEXITCODE -ne 0) { throw 'Falha ao iniciar PostgreSQL em modo de teste.' }
     }
