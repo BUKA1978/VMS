@@ -1,4 +1,4 @@
-name: Build FVR VMS 4.0.1 Windows Installer
+name: Build FVR VMS 4.0.2 Windows Installer
 
 on:
   workflow_dispatch:
@@ -58,7 +58,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Apply FVR VMS 4.0.1 corrections
+      - name: Apply FVR VMS 4.0.2 corrections
         shell: pwsh
         run: |
           $root = Join-Path $PWD "current-src\FVR-VMS"
@@ -68,9 +68,12 @@ jobs:
           Copy-Item (Join-Path $overrides "FVR.ManagementServer.appsettings.json") (Join-Path $root "FVR.ManagementServer\appsettings.json") -Force
           Copy-Item (Join-Path $overrides "FVR.MonitoringClient.App.xaml.cs") (Join-Path $root "FVR.MonitoringClient\App.xaml.cs") -Force
           Copy-Item (Join-Path $overrides "FVR.MonitoringClient.appsettings.json") (Join-Path $root "FVR.MonitoringClient\appsettings.json") -Force
+          Copy-Item (Join-Path $overrides "FVR.MonitoringClient.ApiClient.cs") (Join-Path $root "FVR.MonitoringClient\Services\ApiClient.cs") -Force
+          Copy-Item (Join-Path $overrides "FVR.MonitoringClient.LoginViewModel.cs") (Join-Path $root "FVR.MonitoringClient\ViewModels\LoginViewModel.cs") -Force
+          Copy-Item (Join-Path $overrides "FVR.MonitoringClient.LoginWindow.xaml") (Join-Path $root "FVR.MonitoringClient\Views\LoginWindow.xaml") -Force
           Copy-Item (Join-Path $overrides "FVR.RecordingServer.appsettings.json") (Join-Path $root "FVR.RecordingServer\appsettings.json") -Force
           Copy-Item (Join-Path $overrides "bootstrap-postgres.ps1") (Join-Path $root "database\bootstrap-postgres.ps1") -Force
-          Copy-Item (Join-Path $overrides "FVR-VMS-4.0.1.iss") (Join-Path $root "installer\FVR-VMS.iss") -Force
+          Copy-Item (Join-Path $overrides "FVR-VMS-4.0.2.iss") (Join-Path $root "installer\FVR-VMS.iss") -Force
 
           $mgmtProject = Join-Path $root "FVR.ManagementServer\FVR.ManagementServer.csproj"
           dotnet add $mgmtProject package Microsoft.Extensions.Hosting.WindowsServices --version 8.0.0
@@ -108,11 +111,6 @@ jobs:
             }
           }
 
-          $loginXaml = Join-Path $client "Views\LoginWindow.xaml"
-          $loginText = Get-Content $loginXaml -Raw
-          $loginText = $loginText.Replace('VMS 4.0 — Monitoring Client', 'VMS 4.0.1 — Monitoring Client')
-          Set-Content $loginXaml $loginText -Encoding utf8
-
       - name: Publish Management, Recording and Monitoring Client
         id: publish
         working-directory: current-src/FVR-VMS
@@ -125,7 +123,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-4.0.1-publish-log
+          name: FVR-VMS-4.0.2-publish-log
           path: publish.log
           if-no-files-found: warn
           retention-days: 7
@@ -151,7 +149,7 @@ jobs:
           New-Item -ItemType Directory -Path $dest -Force | Out-Null
           Copy-Item (Join-Path $pgsql "*") $dest -Recurse -Force
 
-      - name: Smoke test database bootstrap and admin login
+      - name: Smoke test Management Server discovery and admin login
         shell: pwsh
         run: |
           $root = Join-Path $PWD "current-src\FVR-VMS"
@@ -166,22 +164,30 @@ jobs:
           $mgmtExe = Join-Path $mgmtDir "FVR.ManagementServer.exe"
           $proc = Start-Process -FilePath $mgmtExe -WorkingDirectory $mgmtDir -PassThru
           try {
-            $ready = $false
+            $healthy = $false
             for ($i = 0; $i -lt 60; $i++) {
               try {
-                $body = @{ username = 'admin'; password = 'FVR@2026!' } | ConvertTo-Json
-                $login = Invoke-RestMethod -Uri 'http://127.0.0.1:5000/api/auth/login' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3
-                if ($login.accessToken) {
-                  $ready = $true
-                  Write-Host "Admin login smoke test succeeded for user admin."
+                $health = Invoke-RestMethod -Uri 'http://127.0.0.1:5000/health' -TimeoutSec 3
+                if ($health.status -eq 'ok' -and $health.service -eq 'Management Server') {
+                  $healthy = $true
+                  Write-Host "Management Server health discovery succeeded."
                   break
                 }
               }
-              catch {
-                Start-Sleep -Seconds 1
-              }
+              catch { Start-Sleep -Seconds 1 }
             }
-            if (-not $ready) { throw "Management Server did not accept admin / FVR@2026! within 60 seconds." }
+            if (-not $healthy) { throw "Management Server health endpoint was not detected." }
+
+            $body = @{ username = 'admin'; password = 'FVR@2026!' } | ConvertTo-Json
+            $login = Invoke-RestMethod -Uri 'http://127.0.0.1:5000/api/auth/login' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 5
+            if (-not $login.accessToken) { throw "Admin login did not return an access token." }
+            Write-Host "Admin login smoke test succeeded for admin / FVR@2026!."
+
+            $clientConfig = Get-Content (Join-Path $publish "MonitoringClient\appsettings.json") -Raw | ConvertFrom-Json
+            if ($clientConfig.ManagementServerUrl -ne 'http://127.0.0.1:5000') {
+              throw "Monitoring Client local Management Server URL is incorrect."
+            }
+            Write-Host "Monitoring Client defaults to http://127.0.0.1:5000."
           }
           finally {
             if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
@@ -208,7 +214,7 @@ jobs:
       - name: Verify generated installer
         shell: pwsh
         run: |
-          $setup = ".\current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.1-Setup.exe"
+          $setup = ".\current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.2-Setup.exe"
           if (-not (Test-Path $setup)) { throw "Installer EXE was not generated." }
           Get-Item $setup | Select-Object FullName, Length | Format-List
           Get-FileHash $setup -Algorithm SHA256 | Format-List
@@ -216,15 +222,15 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-4.0.1-Setup
-          path: current-src/FVR-VMS/publish/installer-output/FVR-VMS-4.0.1-Setup.exe
+          name: FVR-VMS-4.0.2-Setup
+          path: current-src/FVR-VMS/publish/installer-output/FVR-VMS-4.0.2-Setup.exe
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload published applications
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-4.0.1-Windows-x64
+          name: FVR-VMS-4.0.2-Windows-x64
           path: |
             current-src/FVR-VMS/publish/ManagementServer/**
             current-src/FVR-VMS/publish/RecordingServer/**
