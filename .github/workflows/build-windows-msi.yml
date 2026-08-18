@@ -1,4 +1,4 @@
-name: Build Current FVR VMS Windows Installer
+name: Build FVR VMS 4.0.1 Windows Installer
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
 
     steps:
       - name: Checkout
@@ -53,79 +53,44 @@ jobs:
             throw "FVR VMS source extraction failed."
           }
 
-      - name: Inspect authentication and database bootstrap sources
-        shell: pwsh
-        run: |
-          $root = Join-Path $PWD "current-src\FVR-VMS"
-          foreach ($rel in @(
-            'FVR.ManagementServer\Controllers\AuthController.cs',
-            'FVR.ManagementServer\Models\Entities.cs',
-            'FVR.ManagementServer\Data\AppDbContext.cs',
-            'FVR.ManagementServer\Program.cs',
-            'FVR.ManagementServer\appsettings.json',
-            'database\001_init_schema.sql',
-            'installer\FVR-VMS.iss'
-          )) {
-            Write-Host "===== $rel ====="
-            Get-Content (Join-Path $root $rel) -Raw
-          }
-
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      - name: Verify .NET SDK
-        shell: pwsh
-        run: |
-          dotnet --info
-          dotnet --version
-
-      - name: Make Management Server Windows-service compatible
+      - name: Apply FVR VMS 4.0.1 corrections
         shell: pwsh
         run: |
           $root = Join-Path $PWD "current-src\FVR-VMS"
-          $project = Join-Path $root "FVR.ManagementServer\FVR.ManagementServer.csproj"
-          dotnet add $project package Microsoft.Extensions.Hosting.WindowsServices --version 8.0.0
-          if ($LASTEXITCODE -ne 0) { throw "Failed to add Windows Services hosting package." }
+          $overrides = Join-Path $PWD "build\overrides"
 
-          $programPath = Join-Path $root "FVR.ManagementServer\Program.cs"
-          $program = Get-Content $programPath -Raw
-          $needle = 'var builder = WebApplication.CreateBuilder(args);'
-          if (-not $program.Contains($needle)) { throw "Management Server Program.cs patch point not found." }
-          $replacement = "var builder = WebApplication.CreateBuilder(args);`r`nbuilder.Services.AddWindowsService(options => options.ServiceName = `"FVR Management Server`" );"
-          $program = $program.Replace($needle, $replacement)
-          Set-Content $programPath $program -Encoding utf8
+          Copy-Item (Join-Path $overrides "FVR.ManagementServer.Program.cs") (Join-Path $root "FVR.ManagementServer\Program.cs") -Force
+          Copy-Item (Join-Path $overrides "FVR.ManagementServer.appsettings.json") (Join-Path $root "FVR.ManagementServer\appsettings.json") -Force
+          Copy-Item (Join-Path $overrides "FVR.MonitoringClient.App.xaml.cs") (Join-Path $root "FVR.MonitoringClient\App.xaml.cs") -Force
+          Copy-Item (Join-Path $overrides "FVR.MonitoringClient.appsettings.json") (Join-Path $root "FVR.MonitoringClient\appsettings.json") -Force
+          Copy-Item (Join-Path $overrides "FVR.RecordingServer.appsettings.json") (Join-Path $root "FVR.RecordingServer\appsettings.json") -Force
+          Copy-Item (Join-Path $overrides "bootstrap-postgres.ps1") (Join-Path $root "database\bootstrap-postgres.ps1") -Force
+          Copy-Item (Join-Path $overrides "FVR-VMS-4.0.1.iss") (Join-Path $root "installer\FVR-VMS.iss") -Force
 
-      - name: Fix Monitoring Client compile issues
-        shell: pwsh
-        run: |
-          $root = Join-Path $PWD "current-src\FVR-VMS"
+          $mgmtProject = Join-Path $root "FVR.ManagementServer\FVR.ManagementServer.csproj"
+          dotnet add $mgmtProject package Microsoft.Extensions.Hosting.WindowsServices --version 8.0.0
+          if ($LASTEXITCODE -ne 0) { throw "Failed to add Windows Services package to Management Server." }
+
           $client = Join-Path $root "FVR.MonitoringClient"
-          $project = Join-Path $client "FVR.MonitoringClient.csproj"
-
-          dotnet add $project package Microsoft.Extensions.Configuration.Json --version 8.0.0
+          $clientProject = Join-Path $client "FVR.MonitoringClient.csproj"
+          dotnet add $clientProject package Microsoft.Extensions.Configuration.Json --version 8.0.0
           if ($LASTEXITCODE -ne 0) { throw "Failed to add Configuration.Json package." }
-          dotnet add $project package Microsoft.Extensions.DependencyInjection --version 8.0.0
+          dotnet add $clientProject package Microsoft.Extensions.DependencyInjection --version 8.0.0
           if ($LASTEXITCODE -ne 0) { throw "Failed to add DependencyInjection package." }
 
           function Replace-InFile([string]$path, [string]$old, [string]$new) {
             $text = Get-Content $path -Raw
             if (-not $text.Contains($old)) { throw "Patch point not found in $path : $old" }
-            $text = $text.Replace($old, $new)
-            Set-Content $path $text -Encoding utf8
+            Set-Content $path ($text.Replace($old, $new)) -Encoding utf8
           }
-
-          $app = Join-Path $client "App.xaml.cs"
-          $appText = Get-Content $app -Raw
-          if (-not $appText.Contains('using System.Net.Http;')) {
-            $appText = $appText.Replace('using System.Windows;', "using System.Windows;`r`nusing System.Net.Http;")
-          }
-          $appText = $appText.Replace('public partial class App : Application', 'public partial class App : System.Windows.Application')
-          $appText = $appText.Replace('protected override void OnStartup(StartupEventArgs e)', 'protected override void OnStartup(System.Windows.StartupEventArgs e)')
-          Set-Content $app $appText -Encoding utf8
 
           Replace-InFile (Join-Path $client "Views\LoginWindow.xaml.cs") 'private async void PasswordBox_KeyDown(object sender, KeyEventArgs e)' 'private async void PasswordBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)'
+          Replace-InFile (Join-Path $client "Views\WallWindow.xaml.cs") 'private void Window_KeyDown(object sender, KeyEventArgs e)' 'private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)'
 
           $main = Join-Path $client "Views\MainWindow.xaml.cs"
           $mainText = Get-Content $main -Raw
@@ -135,57 +100,93 @@ jobs:
           $mainText = $mainText.Replace('DragDrop.DoDragDrop(CameraListBox, camera, DragDropEffects.Copy);', 'System.Windows.DragDrop.DoDragDrop(CameraListBox, camera, System.Windows.DragDropEffects.Copy);')
           Set-Content $main $mainText -Encoding utf8
 
-          Replace-InFile (Join-Path $client "Views\WallWindow.xaml.cs") 'private void Window_KeyDown(object sender, KeyEventArgs e)' 'private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)'
-
           foreach ($relative in @('Services\ApiClient.cs', 'Services\PtzService.cs')) {
             $path = Join-Path $client $relative
             $text = Get-Content $path -Raw
             if (-not $text.Contains('using System.Net.Http;')) {
-              $text = "using System.Net.Http;`r`n" + $text
-              Set-Content $path $text -Encoding utf8
+              Set-Content $path ("using System.Net.Http;`r`n" + $text) -Encoding utf8
             }
           }
 
-      - name: Fix installer metadata
-        shell: pwsh
-        run: |
-          $issPath = Join-Path $PWD "current-src\FVR-VMS\installer\FVR-VMS.iss"
-          $iss = Get-Content $issPath -Raw
-          $iss = $iss.Replace('AppId={{B4C1F6A0-9F2E-4B7A-9C1D-FVRVMS40000}}', 'AppId={{B4C1F6A0-9F2E-4B7A-9C1D-F40000040000}}')
-          $iss = $iss.Replace('#define MyAppPublisher "Sua Empresa"', '#define MyAppPublisher "FVR"')
-          Set-Content $issPath $iss -Encoding utf8
+          $loginXaml = Join-Path $client "Views\LoginWindow.xaml"
+          $loginText = Get-Content $loginXaml -Raw
+          $loginText = $loginText.Replace('VMS 4.0 — Monitoring Client', 'VMS 4.0.1 — Monitoring Client')
+          Set-Content $loginXaml $loginText -Encoding utf8
 
       - name: Publish Management, Recording and Monitoring Client
         id: publish
-        continue-on-error: true
         working-directory: current-src/FVR-VMS
         shell: pwsh
         run: |
-          $log = Join-Path $env:GITHUB_WORKSPACE "publish.log"
-          $failed = $false
-          try {
-            .\installer\build-all.ps1 *>&1 | Tee-Object -FilePath $log
-          }
-          catch {
-            $failed = $true
-            $_ | Out-String | Tee-Object -FilePath $log -Append | Write-Host
-          }
-          if ($LASTEXITCODE -ne 0) { $failed = $true }
-          if ($failed) { exit 1 }
+          .\installer\build-all.ps1 *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\publish.log"
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed." }
 
       - name: Upload publish diagnostic log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-publish-log
+          name: FVR-VMS-4.0.1-publish-log
           path: publish.log
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
 
-      - name: Stop after publish failure
-        if: steps.publish.outcome == 'failure'
+      - name: Download verified PostgreSQL 18.4 portable binaries
         shell: pwsh
-        run: throw "dotnet publish failed; diagnostic artifact uploaded."
+        run: |
+          $root = Join-Path $PWD "current-src\FVR-VMS"
+          $zip = Join-Path $env:RUNNER_TEMP "postgresql-18.4-2-windows-x64-binaries.zip"
+          $extract = Join-Path $env:RUNNER_TEMP "postgresql-18.4"
+          $url = "https://get.enterprisedb.com/postgresql/postgresql-18.4-2-windows-x64-binaries.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "PostgreSQL SHA-256: $hash"
+          if ($hash -ne "02e239529ed7833d169f98d915d3feffe0813264b08b3ae353e78e8b9c97e1a6") {
+            throw "PostgreSQL binary checksum mismatch."
+          }
+          if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+          Expand-Archive $zip -DestinationPath $extract -Force
+          $pgsql = Join-Path $extract "pgsql"
+          if (-not (Test-Path (Join-Path $pgsql "bin\postgres.exe"))) { throw "PostgreSQL binaries not found after extraction." }
+          $dest = Join-Path $root "publish\PostgreSQL"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item (Join-Path $pgsql "*") $dest -Recurse -Force
+
+      - name: Smoke test database bootstrap and admin login
+        shell: pwsh
+        run: |
+          $root = Join-Path $PWD "current-src\FVR-VMS"
+          $publish = Join-Path $root "publish"
+          $data = Join-Path $env:RUNNER_TEMP "fvr-vms-pgdata"
+          if (Test-Path $data) { Remove-Item $data -Recurse -Force }
+
+          & (Join-Path $publish "database\bootstrap-postgres.ps1") -AppRoot $publish -DataDir $data -NoService
+          if ($LASTEXITCODE -ne 0) { throw "PostgreSQL/bootstrap smoke test failed." }
+
+          $mgmtDir = Join-Path $publish "ManagementServer"
+          $mgmtExe = Join-Path $mgmtDir "FVR.ManagementServer.exe"
+          $proc = Start-Process -FilePath $mgmtExe -WorkingDirectory $mgmtDir -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              try {
+                $body = @{ username = 'admin'; password = 'FVR@2026!' } | ConvertTo-Json
+                $login = Invoke-RestMethod -Uri 'http://127.0.0.1:5000/api/auth/login' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3
+                if ($login.accessToken) {
+                  $ready = $true
+                  Write-Host "Admin login smoke test succeeded for user admin."
+                  break
+                }
+              }
+              catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) { throw "Management Server did not accept admin / FVR@2026! within 60 seconds." }
+          }
+          finally {
+            if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            & (Join-Path $publish "PostgreSQL\bin\pg_ctl.exe") stop -D $data -m fast -w | Out-Null
+          }
 
       - name: Install Inno Setup
         shell: pwsh
@@ -207,27 +208,27 @@ jobs:
       - name: Verify generated installer
         shell: pwsh
         run: |
-          $setup = ".\current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.0-Setup.exe"
+          $setup = ".\current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.1-Setup.exe"
           if (-not (Test-Path $setup)) { throw "Installer EXE was not generated." }
           Get-Item $setup | Select-Object FullName, Length | Format-List
           Get-FileHash $setup -Algorithm SHA256 | Format-List
-          Get-ChildItem ".\current-src\FVR-VMS\publish" -Recurse -Filter *.exe | Select-Object FullName, Length | Format-Table -AutoSize
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-4.0.0-Setup
-          path: current-src/FVR-VMS/publish/installer-output/FVR-VMS-4.0.0-Setup.exe
+          name: FVR-VMS-4.0.1-Setup
+          path: current-src/FVR-VMS/publish/installer-output/FVR-VMS-4.0.1-Setup.exe
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload published applications
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-4.0.0-Windows-x64
+          name: FVR-VMS-4.0.1-Windows-x64
           path: |
             current-src/FVR-VMS/publish/ManagementServer/**
             current-src/FVR-VMS/publish/RecordingServer/**
             current-src/FVR-VMS/publish/MonitoringClient/**
+            current-src/FVR-VMS/publish/database/**
           if-no-files-found: error
           retention-days: 7
