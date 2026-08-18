@@ -81,8 +81,6 @@ Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""FVR VMS
 Filename: "net.exe"; Parameters: "start ""FVR Management Server"""; Flags: runhidden waituntilterminated; Components: mgmt; StatusMsg: "Iniciando FVR Management Server..."
 Filename: "net.exe"; Parameters: "start ""FVR Recording Server"""; Flags: runhidden waituntilterminated; Components: recorder; StatusMsg: "Iniciando FVR Recording Server..."
 
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""$ok=$false; 1..30 | %% { try { $r=Invoke-RestMethod -Uri 'http://127.0.0.1:5000/health' -TimeoutSec 2; if($r.status -eq 'ok'){$ok=$true;break} } catch {}; Start-Sleep 1 }; if(-not $ok){exit 2}"""; Flags: runhidden waituntilterminated; Components: mgmt; StatusMsg: "Validando comunicação com o Management Server..."
-
 Filename: "{app}\MonitoringClient\FVR.MonitoringClient.exe"; Description: "Abrir FVR Monitoring Client"; Flags: postinstall nowait skipifsilent; Components: client
 
 [UninstallRun]
