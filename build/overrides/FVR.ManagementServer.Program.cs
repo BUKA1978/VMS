@@ -108,6 +108,15 @@ if (app.Environment.IsDevelopment())
 app.UseCors("ClientApps");
 app.UseAuthentication();
 app.UseAuthorization();
-app.MapControllers();
 
+app.MapGet("/health", () => Results.Ok(new
+{
+    status = "ok",
+    product = "FVR VMS",
+    version = "4.0.2",
+    service = "Management Server",
+    utc = DateTimeOffset.UtcNow
+})).AllowAnonymous();
+
+app.MapControllers();
 app.Run();
