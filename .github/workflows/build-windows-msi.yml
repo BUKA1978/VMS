@@ -17,18 +17,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Reconstruct exact uploaded ZIP
+      - name: Reconstruct validated VMS source archive
         shell: pwsh
         run: |
-          $parts = 0..4 | ForEach-Object { Get-Content ".\current.part$_.b64" -Raw }
-          $base64 = ($parts -join "")
-          [IO.File]::WriteAllBytes("FVR-VMS-current.zip", [Convert]::FromBase64String($base64))
-          $hash = (Get-FileHash ".\FVR-VMS-current.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "ZIP SHA-256: $hash"
-          if ($hash -ne "c7f38fc080305639a1ce98e4918dac9570ca88f522dc67a7a71a5576efb69a5c") {
-            throw "Uploaded ZIP checksum mismatch."
+          $files = @(
+            ".\source.part0.b64",
+            ".\source.part1a.b64",
+            ".\source.part1b.b64",
+            ".\source.part2.b64",
+            ".\source.part3.b64",
+            ".\source.part4.b64",
+            ".\source.part5.b64",
+            ".\source.part6.b64"
+          )
+          $base64 = (($files | ForEach-Object { Get-Content $_ -Raw }) -join "")
+          [IO.File]::WriteAllBytes("FVR-VMS-current.tar.xz", [Convert]::FromBase64String($base64))
+          $hash = (Get-FileHash ".\FVR-VMS-current.tar.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Source archive SHA-256: $hash"
+          if ($hash -ne "47eebd03ff2885dd28d34455fb6762e037b0c9b9edee4552a51af3dfe8c129e1") {
+            throw "Source archive checksum mismatch."
           }
-          Expand-Archive ".\FVR-VMS-current.zip" -DestinationPath ".\current-src" -Force
+          New-Item -ItemType Directory -Path ".\current-src" -Force | Out-Null
+          tar -xf ".\FVR-VMS-current.tar.xz" -C ".\current-src"
+          if ($LASTEXITCODE -ne 0) { throw "Source archive extraction failed." }
           if (-not (Test-Path ".\current-src\FVR-VMS\installer\build-all.ps1")) {
             throw "FVR VMS source extraction failed."
           }
@@ -50,6 +61,7 @@ jobs:
           $root = Join-Path $PWD "current-src\FVR-VMS"
           $project = Join-Path $root "FVR.ManagementServer\FVR.ManagementServer.csproj"
           dotnet add $project package Microsoft.Extensions.Hosting.WindowsServices --version 8.0.0
+          if ($LASTEXITCODE -ne 0) { throw "Failed to add Windows Services hosting package." }
 
           $programPath = Join-Path $root "FVR.ManagementServer\Program.cs"
           $program = Get-Content $programPath -Raw
