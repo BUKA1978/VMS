@@ -90,9 +90,36 @@ jobs:
           Set-Content $issPath $iss -Encoding utf8
 
       - name: Publish Management, Recording and Monitoring Client
+        id: publish
+        continue-on-error: true
         working-directory: current-src/FVR-VMS
         shell: pwsh
-        run: .\installer\build-all.ps1
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE "publish.log"
+          $failed = $false
+          try {
+            .\installer\build-all.ps1 *>&1 | Tee-Object -FilePath $log
+          }
+          catch {
+            $failed = $true
+            $_ | Out-String | Tee-Object -FilePath $log -Append | Write-Host
+          }
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          if ($failed) { exit 1 }
+
+      - name: Upload publish diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FVR-VMS-publish-log
+          path: publish.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Stop after publish failure
+        if: steps.publish.outcome == 'failure'
+        shell: pwsh
+        run: throw "dotnet publish failed; diagnostic artifact uploaded."
 
       - name: Install Inno Setup
         shell: pwsh
