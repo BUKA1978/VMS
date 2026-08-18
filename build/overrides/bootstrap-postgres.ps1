@@ -80,7 +80,8 @@ END
 `$`$;
 
 SELECT 'CREATE DATABASE fvr_vms OWNER fvr_app'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'fvr_vms')\gexec
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'fvr_vms')
+\gexec
 "@ | Set-Content -Path $bootstrapSql -Encoding UTF8
 
     & $Psql -h 127.0.0.1 -p $Port -U postgres -d postgres -v ON_ERROR_STOP=1 -f $bootstrapSql
