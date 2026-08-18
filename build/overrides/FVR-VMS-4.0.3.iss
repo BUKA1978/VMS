@@ -104,7 +104,6 @@ begin
         SysErrorMessage(ResultCode));
 
     if ResultCode <> 0 then
-      RaiseException('A instalação dos serviços do FVR VMS falhou. O Setup não será considerado concluído.' +
-        #13#10#13#10 + 'Consulte os logs em C:\ProgramData\FVR VMS\Logs. Código: ' + IntToStr(ResultCode));
+      RaiseException('A instalação dos serviços do FVR VMS falhou. O Setup não será considerado concluído. Consulte os logs em C:\ProgramData\FVR VMS\Logs. Código: ' + IntToStr(ResultCode));
   end;
 end;
