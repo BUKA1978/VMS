@@ -37,12 +37,16 @@ jobs:
           )
           $base64 = (($files | ForEach-Object { Get-Content $_ -Raw }) -join "")
           [IO.File]::WriteAllBytes("FVR-VMS-current.tar.xz", [Convert]::FromBase64String($base64))
-          $hash = (Get-FileHash ".\FVR-VMS-current.tar.xz" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $archive = Get-Item ".\FVR-VMS-current.tar.xz"
+          $hash = (Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Source archive bytes: $($archive.Length)"
           Write-Host "Source archive SHA-256: $hash"
-          if ($hash -ne "a64f620207cd3ac53465b74e2dad14e041d856835dc6c84049b0fb9e30afad8d") {
-            throw "Source archive checksum mismatch."
+          if ($hash -ne "a64f64cbf51cbdf90008c2a3656695625cdcfab0fdec167bd257e98384c25c81") {
+            throw "Source archive checksum mismatch on Windows runner."
           }
           New-Item -ItemType Directory -Path ".\current-src" -Force | Out-Null
+          tar -tf ".\FVR-VMS-current.tar.xz" | Select-Object -First 10
+          if ($LASTEXITCODE -ne 0) { throw "Source archive integrity check failed." }
           tar -xf ".\FVR-VMS-current.tar.xz" -C ".\current-src"
           if ($LASTEXITCODE -ne 0) { throw "Source archive extraction failed." }
           if (-not (Test-Path ".\current-src\FVR-VMS\installer\build-all.ps1")) {
