@@ -19,15 +19,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Rebuild source archive
+      - name: Extract source ZIP
         shell: pwsh
         run: |
-          $parts = 0..3 | ForEach-Object { Get-Content ".\archive.part$_.b64" -Raw }
-          $base64 = ($parts -join "")
-          [IO.File]::WriteAllBytes("project.tar.xz", [Convert]::FromBase64String($base64))
-          tar -xf project.tar.xz
+          if (-not (Test-Path ".\project.zip")) { throw "project.zip not found." }
+          Expand-Archive -Path ".\project.zip" -DestinationPath "." -Force
           if (-not (Test-Path ".\FVR-VMS-Etapa10-WindowsNative\FVR.VMS.Etapa10.sln")) {
-            throw "Source archive reconstruction failed."
+            throw "Source ZIP extraction failed."
           }
 
       - name: Setup .NET from global.json
