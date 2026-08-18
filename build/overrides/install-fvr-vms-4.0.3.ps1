@@ -14,15 +14,11 @@ New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $LogFile = Join-Path $LogDir ('install-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
 Start-Transcript -Path $LogFile -Force | Out-Null
 
-function Write-Step([string]$Message) {
-    Write-Host "[FVR VMS] $Message"
-}
+function Write-Step([string]$Message) { Write-Host "[FVR VMS] $Message" }
 
 function Invoke-Sc([string[]]$Arguments) {
     & sc.exe @Arguments | ForEach-Object { Write-Host $_ }
-    if ($LASTEXITCODE -ne 0) {
-        throw "sc.exe $($Arguments -join ' ') falhou com código $LASTEXITCODE."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe $($Arguments -join ' ') falhou com código $LASTEXITCODE." }
 }
 
 function Wait-ServiceState([string]$Name, [string]$State = 'Running', [int]$TimeoutSeconds = 45) {
@@ -133,10 +129,32 @@ function Wait-RecorderOnline([string]$ServerId, [string]$AccessToken, [int]$Time
     throw "Recording Server $ServerId não ficou online no Management Server."
 }
 
+function Validate-Stability([string]$RecorderId) {
+    Write-Step 'Executando validação final de estabilidade por 20 segundos.'
+    Start-Sleep -Seconds 20
+
+    if ($InstallManagement) {
+        Wait-ServiceState -Name 'FVR PostgreSQL 18' -State 'Running' -TimeoutSeconds 5 | Out-Null
+        Wait-ServiceState -Name 'FVR Management Server' -State 'Running' -TimeoutSeconds 5 | Out-Null
+        $stableHealth = Wait-Management -TimeoutSeconds 10
+        if ($stableHealth.status -ne 'ok') { throw 'Management Server perdeu o estado saudável durante a validação final.' }
+        $stableToken = Login-Admin
+        Write-Step 'Management Server permaneceu ativo, saudável e autenticando após 20 segundos.'
+    }
+
+    if ($InstallRecorder) {
+        Wait-ServiceState -Name 'FVR Recording Server' -State 'Running' -TimeoutSeconds 5 | Out-Null
+        $stableRecorder = Wait-RecorderOnline -ServerId $RecorderId -AccessToken $stableToken -TimeoutSeconds 10
+        if ($stableRecorder.status -ne 'online') { throw 'Recording Server perdeu o estado online durante a validação final.' }
+        Write-Step 'Recording Server permaneceu ativo e online após 20 segundos.'
+    }
+}
+
 try {
     Write-Step "Iniciando configuração pós-instalação. AppRoot=$AppRoot"
     New-Item -ItemType Directory -Path $ProgramDataRoot -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $ProgramDataRoot 'Recordings') -Force | Out-Null
+    $serverId = $null
 
     if ($InstallManagement) {
         Write-Step 'Preparando PostgreSQL dedicado.'
@@ -176,9 +194,7 @@ try {
     }
 
     if ($InstallRecorder) {
-        if (-not $InstallManagement) {
-            throw 'A instalação do Recording Server 4.0.3 exige Management Server local. Use o tipo Servidor ou Completo.'
-        }
+        if (-not $InstallManagement) { throw 'A instalação do Recording Server 4.0.3 exige Management Server local. Use o tipo Servidor ou Completo.' }
         $serverId = Configure-LocalRecorder -AccessToken $accessToken
         Ensure-Service -Name 'FVR Recording Server' -DisplayName 'FVR Recording Server' -ExePath (Join-Path $AppRoot 'RecordingServer\FVR.RecordingServer.exe') -DependsOn @('FVR Management Server') -Description 'Grava e monitora câmeras IP do FVR VMS'
         Start-Service -Name 'FVR Recording Server'
@@ -196,7 +212,8 @@ try {
         }
     }
 
-    Write-Step 'Pós-instalação concluída com sucesso.'
+    Validate-Stability -RecorderId $serverId
+    Write-Step 'Pós-instalação concluída e estabilidade validada com sucesso.'
     Write-Host "INSTALL_LOG=$LogFile"
     Stop-Transcript | Out-Null
     exit 0
