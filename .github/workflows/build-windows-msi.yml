@@ -72,8 +72,6 @@ jobs:
           Copy-Item (Join-Path $overrides 'diagnose-fvr-vms-4.0.3.ps1') (Join-Path $root 'database\diagnose-fvr-vms.ps1') -Force
           Copy-Item (Join-Path $overrides 'FVR-VMS-4.0.3.iss') (Join-Path $root 'installer\FVR-VMS.iss') -Force
 
-          # Management Server como multi-file self-contained. Para Windows Service isso evita
-          # depender do mecanismo de extração de single-file e deixa as DLLs nativas explícitas.
           $buildAllPath = Join-Path $root 'installer\build-all.ps1'
           $buildAll = Get-Content $buildAllPath -Raw
           $needle = 'Publish-Project "FVR.ManagementServer" "ManagementServer" $true'
@@ -223,7 +221,7 @@ jobs:
 
       - name: Run second Setup as repair-upgrade test
         id: repair
-        if: always() && steps.installtest.outcome == 'success' && steps.services.outcome == 'success' && steps.management.outcome == 'success' && steps.recorder.outcome == 'success' && steps.client.outcome == 'success'
+        if: always()
         continue-on-error: true
         shell: pwsh
         run: |
