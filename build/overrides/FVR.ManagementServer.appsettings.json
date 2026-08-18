@@ -1,0 +1,27 @@
+{
+  "Urls": "http://0.0.0.0:5000",
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "ConnectionStrings": {
+    "Default": "Host=127.0.0.1;Port=55432;Database=fvr_vms;Username=fvr_app;Password=FVR-DB-Local@4.0.1!"
+  },
+  "Jwt": {
+    "Key": "0ce9c4fec5c079f4ff29dd849240d5cc4c496ef4d6cec42ac17d10556e08d907",
+    "Issuer": "FVR.ManagementServer",
+    "Audience": "FVR.Clients",
+    "AccessTokenMinutes": "30",
+    "RefreshTokenDays": "7"
+  },
+  "Security": {
+    "CameraCredentialsKey": "FVRVMS4_0_1_CAMERA_KEY_32BYTES!!"
+  },
+  "BootstrapAdmin": {
+    "Username": "admin",
+    "Password": "FVR@2026!"
+  },
+  "AllowedHosts": "*"
+}
