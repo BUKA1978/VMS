@@ -80,6 +80,55 @@ jobs:
           $program = $program.Replace($needle, $replacement)
           Set-Content $programPath $program -Encoding utf8
 
+      - name: Fix Monitoring Client compile issues
+        shell: pwsh
+        run: |
+          $root = Join-Path $PWD "current-src\FVR-VMS"
+          $client = Join-Path $root "FVR.MonitoringClient"
+          $project = Join-Path $client "FVR.MonitoringClient.csproj"
+
+          dotnet add $project package Microsoft.Extensions.Configuration.Json --version 8.0.0
+          if ($LASTEXITCODE -ne 0) { throw "Failed to add Configuration.Json package." }
+          dotnet add $project package Microsoft.Extensions.DependencyInjection --version 8.0.0
+          if ($LASTEXITCODE -ne 0) { throw "Failed to add DependencyInjection package." }
+
+          function Replace-InFile([string]$path, [string]$old, [string]$new) {
+            $text = Get-Content $path -Raw
+            if (-not $text.Contains($old)) { throw "Patch point not found in $path : $old" }
+            $text = $text.Replace($old, $new)
+            Set-Content $path $text -Encoding utf8
+          }
+
+          $app = Join-Path $client "App.xaml.cs"
+          $appText = Get-Content $app -Raw
+          if (-not $appText.Contains('using System.Net.Http;')) {
+            $appText = $appText.Replace('using System.Windows;', "using System.Windows;`r`nusing System.Net.Http;")
+          }
+          $appText = $appText.Replace('public partial class App : Application', 'public partial class App : System.Windows.Application')
+          $appText = $appText.Replace('protected override void OnStartup(StartupEventArgs e)', 'protected override void OnStartup(System.Windows.StartupEventArgs e)')
+          Set-Content $app $appText -Encoding utf8
+
+          Replace-InFile (Join-Path $client "Views\LoginWindow.xaml.cs") 'private async void PasswordBox_KeyDown(object sender, KeyEventArgs e)' 'private async void PasswordBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)'
+
+          $main = Join-Path $client "Views\MainWindow.xaml.cs"
+          $mainText = Get-Content $main -Raw
+          $mainText = $mainText.Replace('private Point _dragStartPoint;', 'private System.Windows.Point _dragStartPoint;')
+          $mainText = $mainText.Replace('private void CameraListBox_MouseMove(object sender, MouseEventArgs e)', 'private void CameraListBox_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)')
+          $mainText = $mainText.Replace('private void CameraTile_Drop(object sender, DragEventArgs e)', 'private void CameraTile_Drop(object sender, System.Windows.DragEventArgs e)')
+          $mainText = $mainText.Replace('DragDrop.DoDragDrop(CameraListBox, camera, DragDropEffects.Copy);', 'System.Windows.DragDrop.DoDragDrop(CameraListBox, camera, System.Windows.DragDropEffects.Copy);')
+          Set-Content $main $mainText -Encoding utf8
+
+          Replace-InFile (Join-Path $client "Views\WallWindow.xaml.cs") 'private void Window_KeyDown(object sender, KeyEventArgs e)' 'private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)'
+
+          foreach ($relative in @('Services\ApiClient.cs', 'Services\PtzService.cs')) {
+            $path = Join-Path $client $relative
+            $text = Get-Content $path -Raw
+            if (-not $text.Contains('using System.Net.Http;')) {
+              $text = "using System.Net.Http;`r`n" + $text
+              Set-Content $path $text -Encoding utf8
+            }
+          }
+
       - name: Fix installer metadata
         shell: pwsh
         run: |
