@@ -50,7 +50,24 @@ rel = 'src/FVR.Monitoring.Client/MainWindow.xaml.cs'
 text = read(rel)
 text = text.replace('_playbackTimer.Start();InitializeEtapa10();', '_playbackTimer.Start();InitializeEtapa9();InitializeEtapa10();', 1)
 text = text.replace('        ShutdownEtapa10();\n        _playbackTimer.Stop();', '        ShutdownEtapa10();\n        ShutdownEtapa9();\n        _playbackTimer.Stop();', 1)
+marker = '    private void Window_Closing(object? sender,CancelEventArgs e)\n'
+timeline_methods = '''    private async Task LoadTimelineEventsAsync(List<CameraInfo> cams)\n    {\n        _timelineEvents.Clear();\n        if(_client is null||string.IsNullOrWhiteSpace(_token)){RenderEventMarkers();return;}\n        var response=await _client.RequestAsync<EventsQueryResponse>(new EventsQueryRequest{\n            Token=_token,CameraIds=cams.Select(c=>c.Id).ToList(),StartTimeUtc=_rangeStartUtc,EndTimeUtc=_rangeEndUtc,MaxItems=2000\n        });\n        if(response.Ok)_timelineEvents.AddRange(response.Events.OrderBy(e=>e.OccurredAtUtc));\n        RenderEventMarkers();\n    }\n\n    private void RenderEventMarkers()\n    {\n        EventMarkerCanvas.Children.Clear();\n        var total=(_rangeEndUtc-_rangeStartUtc).TotalSeconds;\n        var width=EventMarkerCanvas.ActualWidth;\n        if(total<=0||width<=0)return;\n        foreach(var ev in _timelineEvents)\n        {\n            var seconds=(ev.OccurredAtUtc-_rangeStartUtc).TotalSeconds;\n            if(seconds<0||seconds>total)continue;\n            var fill=ev.Severity.ToLowerInvariant() switch{\"critical\"=>Brushes.OrangeRed,\"high\"=>Brushes.OrangeRed,\"warning\"=>Brushes.Gold,_=>Brushes.DeepSkyBlue};\n            var marker=new System.Windows.Shapes.Rectangle{Width=2,Height=14,Fill=fill,Opacity=.9};\n            Canvas.SetLeft(marker,Math.Max(0,Math.Min(width-2,(seconds/total)*width)));\n            Canvas.SetTop(marker,2);\n            EventMarkerCanvas.Children.Add(marker);\n        }\n    }\n\n'''
+if 'private async Task LoadTimelineEventsAsync' not in text:
+    if marker not in text: raise SystemExit('Window_Closing marker not found')
+    text = text.replace(marker, timeline_methods + marker, 1)
 write(rel, text)
+
+rel = 'src/FVR.Management.Service/ManagementWorker.cs'
+text = read(rel)
+repls = {
+    'await AuditAsync(s,"layout.save","view_layout",null,true,new{r.Name,r.GridSize},null);': 'await _repository.WriteAuditAsync(s.UserId,"layout.save","view_layout",null,"success","Monitoring Client",null,System.Text.Json.JsonSerializer.Serialize(new{r.Name,r.GridSize}),token);',
+    'await AuditAsync(s,"videowall.save","video_wall",null,true,new{r.Name,Screens=r.Screens.Count},null);': 'await _repository.WriteAuditAsync(s.UserId,"videowall.save","video_wall",null,"success","Monitoring Client",null,System.Text.Json.JsonSerializer.Serialize(new{r.Name,Screens=r.Screens.Count}),token);',
+    'await AuditAsync(s,"emap.save","e_map",id,true,new{r.Name,Pins=r.Pins.Count},null);': 'await _repository.WriteAuditAsync(s.UserId,"emap.save","e_map",id,"success","Monitoring Client",null,System.Text.Json.JsonSerializer.Serialize(new{r.Name,Pins=r.Pins.Count}),token);'
+}
+for old,new in repls.items():
+    if old not in text: raise SystemExit(f'ManagementWorker audit call not found: {old}')
+    text=text.replace(old,new,1)
+write(rel,text)
 
 rel = 'src/FVR.Management.Console/MainWindow.xaml.cs'
 text = read(rel)
@@ -59,10 +76,41 @@ if start_marker not in text:
     raise SystemExit('Management Console misplaced AuditRow marker not found')
 text = text.replace(start_marker, '\n\nprivate async void RefreshLicense_Click', 1)
 storage_marker = '\n}\n\n\npublic sealed class StorageRow\n'
-audit_class = '''\n}\n\npublic sealed class AuditRow\n{\n    public string OccurredLocal { get; }\n    public string? UserName { get; }\n    public string Action { get; }\n    public string Outcome { get; }\n    public string? DetailsJson { get; }\n\n    public AuditRow(AuditInfo a)\n    {\n        OccurredLocal = a.OccurredAtUtc.ToLocalTime().ToString("dd/MM/yyyy HH:mm:ss");\n        UserName = a.UserName;\n        Action = a.Action;\n        Outcome = a.Outcome;\n        DetailsJson = a.DetailsJson;\n    }\n}\n\npublic sealed class StorageRow\n'''
+audit_class = '''\n}\n\npublic sealed class AuditRow\n{\n    public string OccurredLocal { get; }\n    public string? UserName { get; }\n    public string Action { get; }\n    public string Outcome { get; }\n    public string? DetailsJson { get; }\n    public AuditRow(AuditInfo a)\n    {\n        OccurredLocal = a.OccurredAtUtc.ToLocalTime().ToString("dd/MM/yyyy HH:mm:ss");\n        UserName = a.UserName; Action = a.Action; Outcome = a.Outcome; DetailsJson = a.DetailsJson;\n    }\n}\n\npublic sealed class StorageRow\n'''
 if storage_marker not in text:
     raise SystemExit('Management Console StorageRow marker not found')
 text = text.replace(storage_marker, audit_class, 1)
 write(rel, text)
+
+ffmpeg = r'''$ErrorActionPreference="Stop"
+$Root=Split-Path -Parent $PSScriptRoot
+$Dest=Join-Path $Root "src\FVR.Recording.Service\tools\ffmpeg.exe"
+function Test-FvrFfmpeg([string]$Path){
+  try { $null=& $Path -version 2>&1; return ($LASTEXITCODE -eq 0) } catch { return $false }
+}
+if((Test-Path $Dest) -and (Test-FvrFfmpeg $Dest)){
+  Write-Host "FFmpeg pronto em: $Dest" -ForegroundColor Green
+  & $Dest -version | Select-Object -First 2
+  exit 0
+}
+$candidates=@()
+$cmd=Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
+if($null -ne $cmd){$candidates += $cmd.Source}
+if(Test-Path 'C:\ProgramData\chocolatey\lib\ffmpeg\tools'){
+  $candidates += Get-ChildItem 'C:\ProgramData\chocolatey\lib\ffmpeg\tools' -Filter ffmpeg.exe -File -Recurse | ForEach-Object FullName
+}
+foreach($candidate in ($candidates | Select-Object -Unique)){
+  if(-not (Test-FvrFfmpeg $candidate)){continue}
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Dest)|Out-Null
+  Copy-Item $candidate $Dest -Force
+  if(Test-FvrFfmpeg $Dest){
+    Write-Host "FFmpeg copiado para: $Dest" -ForegroundColor Green
+    & $Dest -version | Select-Object -First 2
+    exit 0
+  }
+}
+throw "FFmpeg real não foi encontrado ou não pôde ser validado."
+'''
+write('scripts/Prepare-FFmpeg.ps1', ffmpeg)
 
 print('all build fixes applied')
