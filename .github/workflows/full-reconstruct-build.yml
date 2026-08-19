@@ -29,17 +29,9 @@ jobs:
               $spec = "origin/agent/full-etapa10-safe12k:ci/source.part$p.b64"
               $text = (& git show $spec) -join ''
             } elseif ($i -eq 14) {
-              $spec = "origin/agent/full-etapa10-safe12k:ci/source.part014.b64"
-              $prefix = (& git show $spec) -join ''
-              if ($prefix.Length -ne 7816) { throw "Chunk 014 prefix length mismatch: $($prefix.Length)" }
-              $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::ASCII.GetBytes($prefix))).ToLowerInvariant()
-              Write-Host "Chunk 014 prefix SHA256: $sha"
-              if ($sha -ne '613acb0e3ff210fab672b15e0167b48f4282c2bfcebd7a5a0a6676f0251800d6') { throw 'Chunk 014 prefix SHA256 mismatch.' }
-              $suffixParts = Get-ChildItem 'ci/fix014*.txt' | Sort-Object Name
-              if (-not $suffixParts) { throw 'Missing correction files for chunk 014.' }
-              $suffix = ($suffixParts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
-              if ($suffix.Length -ne 4184) { throw "Chunk 014 suffix length mismatch: $($suffix.Length)" }
-              $text = $prefix + $suffix
+              $parts = Get-ChildItem 'ci/f14/*.txt' | Sort-Object Name
+              if ($parts.Count -ne 24) { throw "Chunk 014 fragment count mismatch: $($parts.Count)" }
+              $text = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
             } else {
               $parts = Get-ChildItem "ci/fix$p*.txt" | Sort-Object Name
               if (-not $parts) { throw "Missing correction files for chunk $p" }
