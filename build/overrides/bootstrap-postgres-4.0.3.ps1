@@ -16,6 +16,11 @@ $SchemaFile = Join-Path $AppRoot 'database\001_init_schema.sql'
 $Port = 55432
 $SuperPassword = 'FVR-PG-Local@4.0.1!'
 $AppPassword = 'FVR-DB-Local@4.0.1!'
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+function Write-Utf8NoBom([string]$Path, [string]$Text) {
+    [IO.File]::WriteAllText($Path, $Text, $Utf8NoBom)
+}
 
 foreach ($exe in @($InitDb, $PgCtl, $PgIsReady, $Psql)) {
     if (-not (Test-Path $exe)) { throw "PostgreSQL incompleto: $exe não encontrado." }
@@ -39,7 +44,7 @@ if (-not (Test-Path (Join-Path $DataDir 'PG_VERSION'))) {
     }
 
     $pwFile = Join-Path $env:TEMP 'fvr_pg_superuser_password.txt'
-    [IO.File]::WriteAllText($pwFile, $SuperPassword, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Utf8NoBom -Path $pwFile -Text $SuperPassword
     try {
         & $InitDb -D $DataDir -U postgres --pwfile=$pwFile --encoding=UTF8 --locale=C --auth-host=scram-sha-256 --auth-local=trust
         if ($LASTEXITCODE -ne 0) { throw "initdb falhou com código $LASTEXITCODE" }
@@ -60,7 +65,7 @@ shared_buffers = '256MB'
 }
 
 if ($NoService) {
-    & $PgIsReady -h 127.0.0.1 -p $Port -U postgres | Out-Null
+    & $PgIsReady -h 127.0.0.1 -p $Port | Out-Null
     if ($LASTEXITCODE -ne 0) {
         $logFile = Join-Path $parentDir 'postgresql.log'
         & $PgCtl start -D $DataDir -l $logFile -w
@@ -82,7 +87,7 @@ else {
 
 $ready = $false
 for ($i = 0; $i -lt 60; $i++) {
-    & $PgIsReady -h 127.0.0.1 -p $Port -U postgres | Out-Null
+    & $PgIsReady -h 127.0.0.1 -p $Port | Out-Null
     if ($LASTEXITCODE -eq 0) { $ready = $true; break }
     Start-Sleep -Seconds 1
 }
@@ -91,7 +96,7 @@ if (-not $ready) { throw 'PostgreSQL FVR não ficou disponível dentro de 60 seg
 $env:PGPASSWORD = $SuperPassword
 try {
     $bootstrapSql = Join-Path $env:TEMP 'fvr_vms_bootstrap.sql'
-    @"
+    $bootstrapText = @"
 DO `$`$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'fvr_app') THEN
@@ -105,7 +110,14 @@ END
 SELECT 'CREATE DATABASE fvr_vms OWNER fvr_app'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'fvr_vms')
 \gexec
-"@ | Set-Content -Path $bootstrapSql -Encoding UTF8
+"@
+    Write-Utf8NoBom -Path $bootstrapSql -Text $bootstrapText
+
+    # Guard against PowerShell 5.1 accidentally creating UTF-8 BOM in SQL files.
+    $firstBytes = [IO.File]::ReadAllBytes($bootstrapSql)
+    if ($firstBytes.Length -ge 3 -and $firstBytes[0] -eq 0xEF -and $firstBytes[1] -eq 0xBB -and $firstBytes[2] -eq 0xBF) {
+        throw 'Arquivo SQL bootstrap foi gerado com BOM UTF-8; instalação interrompida preventivamente.'
+    }
 
     & $Psql -h 127.0.0.1 -p $Port -U postgres -d postgres -v ON_ERROR_STOP=1 -f $bootstrapSql
     if ($LASTEXITCODE -ne 0) { throw 'Falha ao criar usuário/banco fvr_vms.' }
