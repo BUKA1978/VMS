@@ -61,7 +61,7 @@ Name: "{group}\Desinstalar FVR VMS"; Filename: "{uninstallexe}"
 Name: "desktopicon"; Description: "Criar atalho na área de trabalho"; GroupDescription: "Atalhos:"; Components: client
 
 [Run]
-Filename: "{app}\MonitoringClient\FVR.MonitoringClient.exe"; Description: "Abrir FVR Monitoring Client"; Flags: postinstall nowait skipifsilent; Components: client
+Filename: "{app}\MonitoringClient\FVR.MonitoringClient.exe"; Description: "Abrir FVR Monitoring Client"; Flags: postinstall nowait skipifsilent; Components: client; Check: CanLaunchClient
 
 [UninstallRun]
 Filename: "cmd.exe"; Parameters: "/C net stop ""FVR Recording Server"" >nul 2>&1 & sc delete ""FVR Recording Server"" >nul 2>&1 & exit /b 0"; Flags: runhidden; Components: recorder
@@ -75,6 +75,24 @@ WelcomeLabel2=Esta versão valida a instalação real dos serviços antes de con
 FinishedLabel=Instalação concluída e validada.%n%nNa mesma máquina:%nManagement Server: 127.0.0.1%nUsuário: admin%nSenha: FVR@2026!%n%nLogs técnicos ficam em C:\ProgramData\FVR VMS\Logs.
 
 [Code]
+var
+  PostInstallFailed: Boolean;
+  PostInstallError: String;
+  PostInstallExitCode: Integer;
+
+function CanLaunchClient: Boolean;
+begin
+  Result := not PostInstallFailed;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if PostInstallFailed then
+    Result := PostInstallExitCode
+  else
+    Result := 0;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Params: String;
@@ -83,6 +101,8 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    PostInstallFailed := False;
+    PostInstallExitCode := 0;
     Params := '-NoProfile -ExecutionPolicy Bypass -File "' +
       ExpandConstant('{app}\database\install-fvr-vms.ps1') + '"' +
       ' -AppRoot "' + ExpandConstant('{app}') + '"' +
@@ -100,10 +120,30 @@ begin
       ewWaitUntilTerminated, ResultCode);
 
     if not Ok then
-      RaiseException('Não foi possível executar a validação pós-instalação. Erro do Windows: ' +
-        SysErrorMessage(ResultCode));
+    begin
+      PostInstallFailed := True;
+      PostInstallExitCode := 1001;
+      PostInstallError := 'Não foi possível executar a configuração pós-instalação. Erro do Windows: ' + SysErrorMessage(ResultCode);
+    end
+    else if ResultCode <> 0 then
+    begin
+      PostInstallFailed := True;
+      PostInstallExitCode := 1002;
+      PostInstallError := 'A configuração dos serviços do FVR VMS falhou com código ' + IntToStr(ResultCode) + '.';
+    end;
 
-    if ResultCode <> 0 then
-      RaiseException('A instalação dos serviços do FVR VMS falhou. O Setup não será considerado concluído. Consulte os logs em C:\ProgramData\FVR VMS\Logs. Código: ' + IntToStr(ResultCode));
+    if PostInstallFailed then
+    begin
+      WizardForm.FinishedLabel.Caption :=
+        'A instalação NÃO foi concluída corretamente.' + #13#10 + #13#10 +
+        PostInstallError + #13#10 + #13#10 +
+        'Não abra o Monitoring Client até corrigir o problema.' + #13#10 +
+        'Consulte C:\ProgramData\FVR VMS\Logs.';
+      SuppressibleMsgBox(
+        PostInstallError + #13#10 + #13#10 +
+        'O Setup retornará um código de erro e o Monitoring Client não será iniciado.' + #13#10 +
+        'Logs: C:\ProgramData\FVR VMS\Logs',
+        mbError, MB_OK, IDOK);
+    end;
   end;
 end;
