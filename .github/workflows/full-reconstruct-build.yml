@@ -52,6 +52,18 @@ jobs:
           Expand-Archive source-full.zip -DestinationPath fullsrc -Force
           if (-not (Test-Path fullsrc/FVR.VMS.Etapa10.sln)) { throw 'Solution not found after extraction.' }
 
+      - name: Apply compiler fixes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'fullsrc\src\FVR.Common\PlaybackTicketCodec.cs'
+          $text = Get-Content $path -Raw
+          $old = 's += s.Length % 4 switch { 2 => "==", 3 => "=", _ => "" };'
+          $new = 's += (s.Length % 4) switch { 2 => "==", 3 => "=", _ => "" };'
+          if (-not $text.Contains($old)) { throw 'Expected PlaybackTicketCodec source expression not found.' }
+          [IO.File]::WriteAllText($path, $text.Replace($old, $new), [Text.UTF8Encoding]::new($false))
+          Write-Host 'Patched PlaybackTicketCodec.cs switch expression.'
+
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
