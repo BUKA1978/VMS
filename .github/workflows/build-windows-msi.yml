@@ -1,93 +1,296 @@
-name: Build FVR VMS Windows + MSI
+name: Build and Install-Test FVR VMS 4.0.3
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
 
 permissions:
   contents: read
 
+concurrency:
+  group: build-current-vms-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 100
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Rebuild source archive
+      - name: Reconstruct validated VMS source archive
         shell: pwsh
         run: |
-          $parts = 0..3 | ForEach-Object { Get-Content ".\archive.part$_.b64" -Raw }
-          $base64 = ($parts -join "")
-          [IO.File]::WriteAllBytes("project.tar.xz", [Convert]::FromBase64String($base64))
-          tar -xf project.tar.xz
-          if (-not (Test-Path ".\FVR-VMS-Etapa10-WindowsNative\FVR.VMS.Etapa10.sln")) {
-            throw "Source archive reconstruction failed."
+          $files = @(
+            '.\source.part0.b64',
+            '.\source.part1a.b64',
+            '.\source.part1b.b64',
+            '.\source.part2a.b64',
+            '.\source.part2b.b64',
+            '.\source.part3.b64',
+            '.\source.part4.b64',
+            '.\source.part5.b64',
+            '.\source.part6.b64'
+          )
+          $base64 = (($files | ForEach-Object { Get-Content $_ -Raw }) -join '')
+          [IO.File]::WriteAllBytes('FVR-VMS-current.tar.xz', [Convert]::FromBase64String($base64))
+          $hash = (Get-FileHash '.\FVR-VMS-current.tar.xz' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne 'a64f64cbf51cbdf90008c2a3656695625cdcfab0fdec167bd257e98384c25c81') {
+            throw "Source archive checksum mismatch: $hash"
           }
+          New-Item -ItemType Directory -Path '.\current-src' -Force | Out-Null
+          tar -tf '.\FVR-VMS-current.tar.xz' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive integrity check failed.' }
+          tar -xf '.\FVR-VMS-current.tar.xz' -C '.\current-src'
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive extraction failed.' }
 
-      - name: Setup .NET from global.json
+      - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: FVR-VMS-Etapa10-WindowsNative/global.json
+          dotnet-version: '8.0.x'
 
-      - name: Verify SDK
+      - name: Apply FVR VMS 4.0.3 corrections
         shell: pwsh
         run: |
-          dotnet --info
-          dotnet --version
+          $root = Join-Path $PWD 'current-src\FVR-VMS'
+          $overrides = Join-Path $PWD 'build\overrides'
 
-      - name: Restore
-        working-directory: FVR-VMS-Etapa10-WindowsNative
-        shell: pwsh
-        run: dotnet restore .\FVR.VMS.Etapa10.sln
+          Copy-Item (Join-Path $overrides 'FVR.ManagementServer.Program.4.0.3.cs') (Join-Path $root 'FVR.ManagementServer\Program.cs') -Force
+          Copy-Item (Join-Path $overrides 'FVR.ManagementServer.RecordingServersController.4.0.3.cs') (Join-Path $root 'FVR.ManagementServer\Controllers\RecordingServersController.cs') -Force
+          Copy-Item (Join-Path $overrides 'FVR.ManagementServer.appsettings.json') (Join-Path $root 'FVR.ManagementServer\appsettings.json') -Force
+          Copy-Item (Join-Path $overrides 'FVR.MonitoringClient.App.xaml.cs') (Join-Path $root 'FVR.MonitoringClient\App.xaml.cs') -Force
+          Copy-Item (Join-Path $overrides 'FVR.MonitoringClient.appsettings.json') (Join-Path $root 'FVR.MonitoringClient\appsettings.json') -Force
+          Copy-Item (Join-Path $overrides 'FVR.MonitoringClient.ApiClient.cs') (Join-Path $root 'FVR.MonitoringClient\Services\ApiClient.cs') -Force
+          Copy-Item (Join-Path $overrides 'FVR.MonitoringClient.LoginViewModel.cs') (Join-Path $root 'FVR.MonitoringClient\ViewModels\LoginViewModel.cs') -Force
+          Copy-Item (Join-Path $overrides 'FVR.MonitoringClient.LoginWindow.xaml') (Join-Path $root 'FVR.MonitoringClient\Views\LoginWindow.xaml') -Force
+          Copy-Item (Join-Path $overrides 'FVR.RecordingServer.appsettings.json') (Join-Path $root 'FVR.RecordingServer\appsettings.json') -Force
+          Copy-Item (Join-Path $overrides 'bootstrap-postgres-4.0.3.ps1') (Join-Path $root 'database\bootstrap-postgres.ps1') -Force
+          Copy-Item (Join-Path $overrides 'install-fvr-vms-4.0.3.ps1') (Join-Path $root 'database\install-fvr-vms.ps1') -Force
+          Copy-Item (Join-Path $overrides 'diagnose-fvr-vms-4.0.3.ps1') (Join-Path $root 'database\diagnose-fvr-vms.ps1') -Force
+          Copy-Item (Join-Path $overrides 'FVR-VMS-4.0.3.iss') (Join-Path $root 'installer\FVR-VMS.iss') -Force
 
-      - name: Build solution
-        working-directory: FVR-VMS-Etapa10-WindowsNative
-        shell: pwsh
-        run: dotnet build .\FVR.VMS.Etapa10.sln -c Release --no-restore
+          $buildAllPath = Join-Path $root 'installer\build-all.ps1'
+          $buildAll = Get-Content $buildAllPath -Raw
+          $needle = 'Publish-Project "FVR.ManagementServer" "ManagementServer" $true'
+          if (-not $buildAll.Contains($needle)) { throw 'Management publish patch point not found.' }
+          $buildAll = $buildAll.Replace($needle, 'Publish-Project "FVR.ManagementServer" "ManagementServer" $false')
+          Set-Content $buildAllPath $buildAll -Encoding UTF8
 
-      - name: Publish Windows applications
-        working-directory: FVR-VMS-Etapa10-WindowsNative
-        shell: pwsh
-        run: .\scripts\Build-Windows.ps1
+          $mgmtProject = Join-Path $root 'FVR.ManagementServer\FVR.ManagementServer.csproj'
+          dotnet add $mgmtProject package Microsoft.Extensions.Hosting.WindowsServices --version 8.0.0
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to add Windows Services package.' }
 
-      - name: Install WiX CLI
+          $client = Join-Path $root 'FVR.MonitoringClient'
+          $clientProject = Join-Path $client 'FVR.MonitoringClient.csproj'
+          dotnet add $clientProject package Microsoft.Extensions.Configuration.Json --version 8.0.0
+          dotnet add $clientProject package Microsoft.Extensions.DependencyInjection --version 8.0.0
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to add Monitoring Client packages.' }
+
+          function Replace-InFile([string]$path, [string]$old, [string]$new) {
+            $text = Get-Content $path -Raw
+            if (-not $text.Contains($old)) { throw "Patch point not found in $path : $old" }
+            Set-Content $path ($text.Replace($old, $new)) -Encoding UTF8
+          }
+          Replace-InFile (Join-Path $client 'Views\LoginWindow.xaml.cs') 'private async void PasswordBox_KeyDown(object sender, KeyEventArgs e)' 'private async void PasswordBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)'
+          Replace-InFile (Join-Path $client 'Views\WallWindow.xaml.cs') 'private void Window_KeyDown(object sender, KeyEventArgs e)' 'private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)'
+
+          $main = Join-Path $client 'Views\MainWindow.xaml.cs'
+          $mainText = Get-Content $main -Raw
+          $mainText = $mainText.Replace('private Point _dragStartPoint;', 'private System.Windows.Point _dragStartPoint;')
+          $mainText = $mainText.Replace('private void CameraListBox_MouseMove(object sender, MouseEventArgs e)', 'private void CameraListBox_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)')
+          $mainText = $mainText.Replace('private void CameraTile_Drop(object sender, DragEventArgs e)', 'private void CameraTile_Drop(object sender, System.Windows.DragEventArgs e)')
+          $mainText = $mainText.Replace('DragDrop.DoDragDrop(CameraListBox, camera, DragDropEffects.Copy);', 'System.Windows.DragDrop.DoDragDrop(CameraListBox, camera, System.Windows.DragDropEffects.Copy);')
+          Set-Content $main $mainText -Encoding UTF8
+
+          foreach ($relative in @('Services\ApiClient.cs', 'Services\PtzService.cs')) {
+            $path = Join-Path $client $relative
+            $text = Get-Content $path -Raw
+            if (-not $text.Contains('using System.Net.Http;')) {
+              Set-Content $path ("using System.Net.Http;`r`n" + $text) -Encoding UTF8
+            }
+          }
+
+      - name: Publish Management, Recording and Monitoring Client
+        working-directory: current-src/FVR-VMS
         shell: pwsh
         run: |
-          dotnet tool install --global wix
-          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          .\installer\build-all.ps1 *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\publish.log"
+          if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed.' }
+          $mgmtFiles = @(Get-ChildItem '.\publish\ManagementServer' -File)
+          Write-Host "Management published files: $($mgmtFiles.Count)"
+          if ($mgmtFiles.Count -lt 10) { throw 'Management Server was not published as expected multi-file package.' }
 
-      - name: Build MSI
-        working-directory: FVR-VMS-Etapa10-WindowsNative
+      - name: Download verified PostgreSQL 18.4 portable binaries
         shell: pwsh
         run: |
-          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
-          .\scripts\Build-Installer.ps1
+          $root = Join-Path $PWD 'current-src\FVR-VMS'
+          $zip = Join-Path $env:RUNNER_TEMP 'postgresql-18.4-2-windows-x64-binaries.zip'
+          $extract = Join-Path $env:RUNNER_TEMP 'postgresql-18.4'
+          Invoke-WebRequest -Uri 'https://get.enterprisedb.com/postgresql/postgresql-18.4-2-windows-x64-binaries.zip' -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '02e239529ed7833d169f98d915d3feffe0813264b08b3ae353e78e8b9c97e1a6') { throw "PostgreSQL checksum mismatch: $hash" }
+          Expand-Archive $zip -DestinationPath $extract -Force
+          $dest = Join-Path $root 'publish\PostgreSQL'
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item (Join-Path $extract 'pgsql\*') $dest -Recurse -Force
 
-      - name: List generated binaries
-        working-directory: FVR-VMS-Etapa10-WindowsNative
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer EXE
         shell: pwsh
         run: |
-          Get-ChildItem .\release -Recurse -Filter *.exe | Select-Object FullName,Length | Format-Table -AutoSize
-          Get-ChildItem .\installer\output -Filter *.msi | Select-Object FullName,Length | Format-Table -AutoSize
+          $root = Join-Path $PWD 'current-src\FVR-VMS'
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "${env:ProgramFiles}\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw 'ISCC.exe not found.' }
+          & $iscc (Join-Path $root 'installer\FVR-VMS.iss')
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed: $LASTEXITCODE" }
 
-      - name: Upload Windows executables
+      - name: Install-test the actual Setup EXE
+        id: installtest
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $setup = Join-Path $PWD 'current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.3-Setup.exe'
+          $setupLog = Join-Path $env:RUNNER_TEMP 'FVR-VMS-4.0.3-setup-install.log'
+          if (-not (Test-Path $setup)) { throw 'Installer EXE missing.' }
+          $proc = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TYPE=full',("/LOG=`"$setupLog`"")) -Wait -PassThru
+          Write-Host "Setup exit code: $($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) { throw "Actual installer failed with exit code $($proc.ExitCode)." }
+
+      - name: Validate installed services
+        id: services
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          foreach ($name in @('FVR PostgreSQL 18','FVR Management Server','FVR Recording Server')) {
+            $svc = Get-Service -Name $name -ErrorAction Stop
+            Write-Host "$name = $($svc.Status)"
+            if ($svc.Status -ne 'Running') { throw "$name is not running." }
+          }
+
+      - name: Validate Management API and admin login
+        id: management
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $health = Invoke-RestMethod 'http://127.0.0.1:5000/health' -TimeoutSec 8
+          Write-Host ($health | ConvertTo-Json -Compress)
+          if ($health.status -ne 'ok' -or $health.version -ne '4.0.3') { throw 'Management health/version invalid.' }
+          $body = @{username='admin';password='FVR@2026!'} | ConvertTo-Json
+          $login = Invoke-RestMethod 'http://127.0.0.1:5000/api/auth/login' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 8
+          if (-not $login.accessToken) { throw 'Admin login failed.' }
+          Write-Host 'Management API + admin login = OK'
+
+      - name: Validate Recording Server registration and online status
+        id: recorder
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $body = @{username='admin';password='FVR@2026!'} | ConvertTo-Json
+          $login = Invoke-RestMethod 'http://127.0.0.1:5000/api/auth/login' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 8
+          $headers = @{Authorization="Bearer $($login.accessToken)"}
+          $servers = @(Invoke-RestMethod 'http://127.0.0.1:5000/api/recordingservers' -Headers $headers -TimeoutSec 8)
+          $rec = $servers | Where-Object {$_.hostname -eq $env:COMPUTERNAME} | Select-Object -First 1
+          if (-not $rec) { throw 'Local Recording Server was not registered.' }
+          Write-Host ($rec | ConvertTo-Json -Compress)
+          if ($rec.status -ne 'online') { throw 'Local Recording Server is not online.' }
+          $cfg = Get-Content 'C:\Program Files\FVR VMS\RecordingServer\appsettings.json' -Raw | ConvertFrom-Json
+          if ([string]$cfg.RecordingServer.RecordingServerId -eq '00000000-0000-0000-0000-000000000000') { throw 'Recorder ID was not configured.' }
+          if ([string]$cfg.RecordingServer.ApiKey -like 'CHANGE_ME*' -or [string]::IsNullOrWhiteSpace([string]$cfg.RecordingServer.ApiKey)) { throw 'Recorder API key was not configured.' }
+
+      - name: Validate Monitoring Client and TCP listener
+        id: client
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $client = 'C:\Program Files\FVR VMS\MonitoringClient\FVR.MonitoringClient.exe'
+          if (-not (Test-Path $client)) { throw "Monitoring Client missing: $client" }
+          $cfg = Get-Content 'C:\Program Files\FVR VMS\MonitoringClient\appsettings.json' -Raw | ConvertFrom-Json
+          Write-Host "Client ManagementServerUrl = $($cfg.ManagementServerUrl)"
+          $listener = Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction Stop | Select-Object -First 1
+          Write-Host "Port 5000 listening PID=$($listener.OwningProcess), address=$($listener.LocalAddress)"
+
+      - name: Run second Setup as repair-upgrade test
+        id: repair
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $setup = Join-Path $PWD 'current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.3-Setup.exe'
+          $repairLog = Join-Path $env:RUNNER_TEMP 'FVR-VMS-4.0.3-setup-repair.log'
+          $proc = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TYPE=full',("/LOG=`"$repairLog`"")) -Wait -PassThru
+          Write-Host "Repair Setup exit code: $($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) { throw "Repair installation failed with exit code $($proc.ExitCode)." }
+          foreach ($name in @('FVR PostgreSQL 18','FVR Management Server','FVR Recording Server')) {
+            $svc = Get-Service -Name $name -ErrorAction Stop
+            if ($svc.Status -ne 'Running') { throw "$name is not running after repair." }
+          }
+          $h = Invoke-RestMethod 'http://127.0.0.1:5000/health' -TimeoutSec 8
+          if ($h.status -ne 'ok') { throw 'Management unhealthy after repair.' }
+          $body = @{username='admin';password='FVR@2026!'} | ConvertTo-Json
+          $login = Invoke-RestMethod 'http://127.0.0.1:5000/api/auth/login' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 8
+          if (-not $login.accessToken) { throw 'Admin login failed after repair.' }
+          Write-Host 'SECOND INSTALL / REPAIR TEST PASSED.'
+
+      - name: Collect installed-service diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          .\build\overrides\collect-ci-diagnostics-4.0.3.ps1
+
+      - name: Copy repair log into diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $source = Join-Path $env:RUNNER_TEMP 'FVR-VMS-4.0.3-setup-repair.log'
+          if (Test-Path $source) { Copy-Item $source (Join-Path $env:GITHUB_WORKSPACE 'install-diagnostics\setup-repair.log') -Force }
+
+      - name: Upload actual installation diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-Etapa10-Windows-x64
-          path: FVR-VMS-Etapa10-WindowsNative/release/**
+          name: FVR-VMS-4.0.3-install-test-logs
+          path: install-diagnostics/**
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload MSI
+      - name: Final release gate
+        if: always()
+        shell: pwsh
+        run: |
+          $results = [ordered]@{
+            Setup = '${{ steps.installtest.outcome }}'
+            Services = '${{ steps.services.outcome }}'
+            Management = '${{ steps.management.outcome }}'
+            Recorder = '${{ steps.recorder.outcome }}'
+            Client = '${{ steps.client.outcome }}'
+          }
+          $results.GetEnumerator() | ForEach-Object { Write-Host "$($_.Key) = $($_.Value)" }
+          $failed = @($results.GetEnumerator() | Where-Object { $_.Value -ne 'success' })
+          if ($failed.Count -gt 0) { throw 'FVR VMS actual installation validation failed. Installer will NOT be released.' }
+          if ('${{ steps.repair.outcome }}' -ne 'success') { throw 'Repair/upgrade validation failed. Installer will NOT be released.' }
+          Write-Host 'ACTUAL INSTALL + REPAIR VALIDATION PASSED.'
+
+      - name: Verify generated installer
+        shell: pwsh
+        run: |
+          $setup = '.\current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.3-Setup.exe'
+          Get-Item $setup | Select-Object FullName, Length | Format-List
+          Get-FileHash $setup -Algorithm SHA256 | Format-List
+
+      - name: Upload validated installer
         uses: actions/upload-artifact@v4
         with:
-          name: FVR-VMS-Etapa10-MSI-x64
-          path: FVR-VMS-Etapa10-WindowsNative/installer/output/*.msi
+          name: FVR-VMS-4.0.3-Setup
+          path: current-src/FVR-VMS/publish/installer-output/FVR-VMS-4.0.3-Setup.exe
           if-no-files-found: error
           retention-days: 7

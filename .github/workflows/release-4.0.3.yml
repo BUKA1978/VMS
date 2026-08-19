@@ -1,0 +1,196 @@
+name: Release-Test FVR VMS 4.0.3
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-fvr-vms-403-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-test:
+    runs-on: windows-latest
+    timeout-minutes: 100
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reconstruct source
+        shell: pwsh
+        run: |
+          $files=@('.\source.part0.b64','.\source.part1a.b64','.\source.part1b.b64','.\source.part2a.b64','.\source.part2b.b64','.\source.part3.b64','.\source.part4.b64','.\source.part5.b64','.\source.part6.b64')
+          $base64=(($files|ForEach-Object{Get-Content $_ -Raw}) -join '')
+          [IO.File]::WriteAllBytes('FVR-VMS-current.tar.xz',[Convert]::FromBase64String($base64))
+          $hash=(Get-FileHash '.\FVR-VMS-current.tar.xz' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($hash -ne 'a64f64cbf51cbdf90008c2a3656695625cdcfab0fdec167bd257e98384c25c81'){throw "Source checksum mismatch: $hash"}
+          New-Item -ItemType Directory '.\current-src' -Force|Out-Null
+          tar -xf '.\FVR-VMS-current.tar.xz' -C '.\current-src'
+          if($LASTEXITCODE -ne 0){throw 'Source extraction failed.'}
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Apply 4.0.3 corrections
+        shell: pwsh
+        run: .\build\apply-4.0.3.ps1 -Root (Join-Path $PWD 'current-src\FVR-VMS')
+
+      - name: Publish VMS applications
+        working-directory: current-src/FVR-VMS
+        shell: pwsh
+        run: |
+          .\installer\build-all.ps1 *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\publish-403.log"
+          if($LASTEXITCODE -ne 0){throw 'dotnet publish failed.'}
+
+      - name: Add verified PostgreSQL portable
+        shell: pwsh
+        run: |
+          $root=Join-Path $PWD 'current-src\FVR-VMS'
+          $zip=Join-Path $env:RUNNER_TEMP 'postgresql-18.4.zip'
+          $extract=Join-Path $env:RUNNER_TEMP 'postgresql-18.4'
+          Invoke-WebRequest -Uri 'https://get.enterprisedb.com/postgresql/postgresql-18.4-2-windows-x64-binaries.zip' -OutFile $zip
+          $hash=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($hash -ne '02e239529ed7833d169f98d915d3feffe0813264b08b3ae353e78e8b9c97e1a6'){throw "PostgreSQL checksum mismatch: $hash"}
+          Expand-Archive $zip -DestinationPath $extract -Force
+          $dest=Join-Path $root 'publish\PostgreSQL'; New-Item -ItemType Directory $dest -Force|Out-Null
+          Copy-Item (Join-Path $extract 'pgsql\*') $dest -Recurse -Force
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile Setup EXE
+        shell: pwsh
+        run: |
+          $root=Join-Path $PWD 'current-src\FVR-VMS'
+          $iscc=@("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe","${env:ProgramFiles}\Inno Setup 6\ISCC.exe")|Where-Object{Test-Path $_}|Select-Object -First 1
+          if(-not $iscc){throw 'ISCC.exe not found.'}
+          & $iscc (Join-Path $root 'installer\FVR-VMS.iss')
+          if($LASTEXITCODE -ne 0){throw "Inno Setup failed: $LASTEXITCODE"}
+
+      - name: Install actual generated Setup
+        shell: pwsh
+        run: |
+          $setup=Join-Path $PWD 'current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.3-Setup.exe'
+          $log=Join-Path $env:RUNNER_TEMP 'FVR-VMS-4.0.3-first-install.log'
+          $p=Start-Process $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TYPE=full',("/LOG=`"$log`"")) -Wait -PassThru
+          Write-Host "First-install exit code=$($p.ExitCode)"
+          if($p.ExitCode -ne 0){throw "First installation failed: $($p.ExitCode)"}
+
+      - name: Validate actual installed system
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          function Assert-System([string]$Stage){
+            Write-Host "=== VALIDATION: $Stage ==="
+            foreach($name in @('FVR PostgreSQL 18','FVR Management Server','FVR Recording Server')){
+              $svc=Get-Service -Name $name -ErrorAction Stop
+              Write-Host "$name=$($svc.Status)"
+              if($svc.Status -ne 'Running'){throw "$name is not running ($Stage)."}
+            }
+            $listener=Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction Stop|Select-Object -First 1
+            Write-Host "TCP5000=$($listener.LocalAddress):$($listener.LocalPort) PID=$($listener.OwningProcess)"
+            $health=Invoke-RestMethod 'http://127.0.0.1:5000/health' -TimeoutSec 8
+            if($health.status -ne 'ok' -or $health.version -ne '4.0.3'){throw "Management health invalid ($Stage)."}
+            $body=@{username='admin';password='FVR@2026!'}|ConvertTo-Json
+            $login=Invoke-RestMethod 'http://127.0.0.1:5000/api/auth/login' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 8
+            if(-not $login.accessToken){throw "Admin login failed ($Stage)."}
+            $headers=@{Authorization="Bearer $($login.accessToken)"}
+            $deadline=(Get-Date).AddSeconds(30); $rec=$null
+            do{
+              $servers=@(Invoke-RestMethod 'http://127.0.0.1:5000/api/recordingservers' -Headers $headers -TimeoutSec 8)
+              $rec=$servers|Where-Object{$_.hostname -eq $env:COMPUTERNAME}|Select-Object -First 1
+              if($rec -and $rec.status -eq 'online'){break}
+              Start-Sleep -Seconds 1
+            }while((Get-Date)-lt $deadline)
+            if(-not $rec){throw "Recording Server not registered ($Stage)."}
+            if($rec.status -ne 'online'){throw "Recording Server not online ($Stage): $($rec.status)"}
+            $client='C:\Program Files\FVR VMS\MonitoringClient\FVR.MonitoringClient.exe'
+            if(-not(Test-Path $client)){throw "Monitoring Client missing ($Stage)."}
+            Write-Host "HEALTH=OK LOGIN=OK RECORDER=ONLINE CLIENT=OK"
+          }
+          Assert-System 'after first install'
+
+      - name: Restart services and validate again
+        shell: pwsh
+        run: |
+          Restart-Service 'FVR Recording Server' -Force
+          Restart-Service 'FVR Management Server' -Force
+          Start-Sleep -Seconds 8
+          foreach($name in @('FVR PostgreSQL 18','FVR Management Server','FVR Recording Server')){
+            $svc=Get-Service -Name $name -ErrorAction Stop
+            if($svc.Status -ne 'Running'){throw "$name failed after restart."}
+          }
+          $deadline=(Get-Date).AddSeconds(30); $ok=$false
+          do{try{$h=Invoke-RestMethod 'http://127.0.0.1:5000/health' -TimeoutSec 4;if($h.status -eq 'ok'){$ok=$true;break}}catch{};Start-Sleep 1}while((Get-Date)-lt $deadline)
+          if(-not $ok){throw 'Management API did not recover after restart.'}
+
+      - name: Run same Setup again as repair upgrade
+        shell: pwsh
+        run: |
+          $setup=Join-Path $PWD 'current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.3-Setup.exe'
+          $log=Join-Path $env:RUNNER_TEMP 'FVR-VMS-4.0.3-repair.log'
+          $p=Start-Process $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TYPE=full',("/LOG=`"$log`"")) -Wait -PassThru
+          Write-Host "Repair exit code=$($p.ExitCode)"
+          if($p.ExitCode -ne 0){throw "Repair installation failed: $($p.ExitCode)"}
+
+      - name: Final release validation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($name in @('FVR PostgreSQL 18','FVR Management Server','FVR Recording Server')){
+            $svc=Get-Service -Name $name -ErrorAction Stop
+            Write-Host "$name=$($svc.Status)"
+            if($svc.Status -ne 'Running'){throw "$name is not running after repair."}
+          }
+          $listener=Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction Stop|Select-Object -First 1
+          $health=Invoke-RestMethod 'http://127.0.0.1:5000/health' -TimeoutSec 8
+          if($health.status -ne 'ok' -or $health.version -ne '4.0.3'){throw 'Final Management health invalid.'}
+          $body=@{username='admin';password='FVR@2026!'}|ConvertTo-Json
+          $login=Invoke-RestMethod 'http://127.0.0.1:5000/api/auth/login' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 8
+          if(-not $login.accessToken){throw 'Final admin login failed.'}
+          $headers=@{Authorization="Bearer $($login.accessToken)"}
+          $deadline=(Get-Date).AddSeconds(30);$rec=$null
+          do{$servers=@(Invoke-RestMethod 'http://127.0.0.1:5000/api/recordingservers' -Headers $headers -TimeoutSec 8);$rec=$servers|Where-Object{$_.hostname -eq $env:COMPUTERNAME}|Select-Object -First 1;if($rec -and $rec.status -eq 'online'){break};Start-Sleep 1}while((Get-Date)-lt $deadline)
+          if(-not $rec -or $rec.status -ne 'online'){throw 'Final Recording Server status invalid.'}
+          if(-not(Test-Path 'C:\Program Files\FVR VMS\MonitoringClient\FVR.MonitoringClient.exe')){throw 'Final Monitoring Client missing.'}
+          Write-Host 'FINAL RELEASE GATE: PASS'
+
+      - name: Collect install logs
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory '.\release-diagnostics' -Force|Out-Null
+          Copy-Item "$env:RUNNER_TEMP\FVR-VMS-4.0.3-*.log" '.\release-diagnostics' -ErrorAction SilentlyContinue
+          Copy-Item 'C:\ProgramData\FVR VMS\Logs\*' '.\release-diagnostics' -ErrorAction SilentlyContinue
+          Get-Service 'FVR PostgreSQL 18','FVR Management Server','FVR Recording Server'|Format-List *|Out-File '.\release-diagnostics\services.txt'
+
+      - name: Upload release diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FVR-VMS-4.0.3-release-diagnostics
+          path: release-diagnostics/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Verify and upload final installer
+        shell: pwsh
+        run: |
+          $setup='.\current-src\FVR-VMS\publish\installer-output\FVR-VMS-4.0.3-Setup.exe'
+          Get-Item $setup|Select-Object FullName,Length|Format-List
+          Get-FileHash $setup -Algorithm SHA256|Format-List
+
+      - name: Upload FVR VMS 4.0.3 Setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: FVR-VMS-4.0.3-Setup
+          path: current-src/FVR-VMS/publish/installer-output/FVR-VMS-4.0.3-Setup.exe
+          if-no-files-found: error
+          retention-days: 7
