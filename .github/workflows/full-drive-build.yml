@@ -1,0 +1,103 @@
+name: Full FVR VMS Etapa 10 Build
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download full source package from Drive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://drive.google.com/uc?export=download&id=1J0nHLvHMB3GvU0DH6mTa53uBdumZBtUT'
+          curl.exe -L --fail --retry 2 "$url" -o source-full.zip
+          $size = (Get-Item source-full.zip).Length
+          Write-Host "Downloaded bytes: $size"
+          if ($size -lt 100000) { throw "Downloaded file is too small; Drive likely returned an auth/HTML page." }
+          $hash = (Get-FileHash source-full.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "SHA256: $hash"
+          if ($hash -ne '028811a400f26c516ab7f4a4306299ffec72e75e3d9e2ebe141712f78c676655') { throw "Source package SHA256 mismatch." }
+          New-Item -ItemType Directory -Force -Path fullsrc | Out-Null
+          Expand-Archive source-full.zip -DestinationPath fullsrc -Force
+          if (-not (Test-Path fullsrc/FVR.VMS.Etapa10.sln)) { throw "Solution not found after extraction." }
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Verify .NET
+        shell: pwsh
+        run: dotnet --info
+
+      - name: Install FFmpeg
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          $ff = Get-Command ffmpeg.exe -ErrorAction Stop
+          Write-Host $ff.Source
+
+      - name: Prepare FFmpeg
+        shell: pwsh
+        working-directory: fullsrc
+        run: ./scripts/Prepare-FFmpeg.ps1
+
+      - name: Restore solution
+        shell: pwsh
+        working-directory: fullsrc
+        run: dotnet restore ./FVR.VMS.Etapa10.sln
+
+      - name: Build solution
+        shell: pwsh
+        working-directory: fullsrc
+        run: dotnet build ./FVR.VMS.Etapa10.sln -c Release --no-restore
+
+      - name: Publish Windows applications
+        shell: pwsh
+        working-directory: fullsrc
+        run: ./scripts/Build-Windows.ps1
+
+      - name: Build MSI
+        shell: pwsh
+        working-directory: fullsrc
+        run: ./scripts/Build-Installer.ps1
+
+      - name: Verify core outputs
+        shell: pwsh
+        working-directory: fullsrc
+        run: |
+          $required = @(
+            'release/Management-Service/FVR.Management.Service.exe',
+            'release/Recording-Service/FVR.Recording.Service.exe',
+            'release/Management-Console/FVR.Management.Console.exe',
+            'release/Monitoring-Client/FVR.Monitoring.Client.exe',
+            'release/Setup-Wizard/FVR.Setup.Wizard.exe',
+            'installer/output/FVR-VMS-4.0-Etapa10-x64.msi'
+          )
+          foreach ($p in $required) {
+            if (-not (Test-Path $p)) { throw "Missing required artifact: $p" }
+            Write-Host "$p => $((Get-Item $p).Length) bytes"
+          }
+
+      - name: Upload full Windows release
+        uses: actions/upload-artifact@v4
+        with:
+          name: FVR-VMS-Etapa10-Full-win-x64
+          path: fullsrc/release/**
+          if-no-files-found: error
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: FVR-VMS-Etapa10-MSI-x64
+          path: fullsrc/installer/output/FVR-VMS-4.0-Etapa10-x64.msi
+          if-no-files-found: error
