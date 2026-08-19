@@ -54,7 +54,26 @@ jobs:
 
       - name: Apply compiler fixes
         shell: pwsh
-        run: python ./ci/apply_build_fixes.py fullsrc
+        run: |
+          $installer = @'
+          $ErrorActionPreference="Stop"
+          $Root=Split-Path -Parent $PSScriptRoot
+          $Release=Join-Path $Root "release"
+          if(-not(Test-Path $Release)){throw "Execute BUILD-APLICATIVO.cmd primeiro."}
+          $wix=Get-Command wix -ErrorAction SilentlyContinue
+          if(!$wix){
+              Write-Host "Instalando WiX CLI..." -ForegroundColor Yellow
+              dotnet tool install --global wix
+              $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          }
+          $Out=Join-Path $Root "installer\output";New-Item -ItemType Directory -Force -Path $Out|Out-Null
+          Push-Location (Join-Path $Root "installer")
+          try{wix build ".\FVR.VMS.Installer.wxs" -arch x64 -o (Join-Path $Out "FVR-VMS-4.0-Etapa10-x64.msi")}
+          finally{Pop-Location}
+          Write-Host "MSI criado em: $Out" -ForegroundColor Green
+          '@
+          [IO.File]::WriteAllText('fullsrc\scripts\Build-Installer.ps1',$installer,[Text.UTF8Encoding]::new($false))
+          python ./ci/apply_build_fixes.py fullsrc
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
