@@ -1,0 +1,153 @@
+name: Full FVR VMS Etapa 10 Reconstructed Build
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Reconstruct and verify full source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch origin "refs/heads/agent/full-etapa10-safe12k:refs/remotes/origin/agent/full-etapa10-safe12k" --depth=1
+          New-Item -ItemType Directory -Force chunks | Out-Null
+          $good = @(0,1,2,3,5,6,8,11,12,13,15)
+          foreach ($i in 0..18) {
+            $p = '{0:D3}' -f $i
+            if ($good -contains $i) {
+              $spec = "origin/agent/full-etapa10-safe12k:ci/source.part$p.b64"
+              $text = (& git show $spec) -join ''
+            } elseif ($i -eq 14) {
+              $parts = Get-ChildItem 'ci/f14/*.txt' | Sort-Object Name
+              if ($parts.Count -ne 24) { throw "Chunk 014 fragment count mismatch: $($parts.Count)" }
+              $text = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+            } else {
+              $parts = Get-ChildItem "ci/fix$p*.txt" | Sort-Object Name
+              if (-not $parts) { throw "Missing correction files for chunk $p" }
+              $text = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+            }
+            $expectedLen = if ($i -eq 18) { 1552 } else { 12000 }
+            if ($text.Length -ne $expectedLen) { throw "Chunk $p length mismatch: $($text.Length), expected $expectedLen" }
+            [IO.File]::WriteAllText((Join-Path 'chunks' "$p.b64"), $text, [Text.Encoding]::ASCII)
+          }
+          $all = ((0..18) | ForEach-Object { Get-Content (Join-Path 'chunks' ('{0:D3}.b64' -f $_)) -Raw }) -join ''
+          if ($all.Length -ne 217552) { throw "Combined Base64 length mismatch: $($all.Length)" }
+          $bytes = [Convert]::FromBase64String($all)
+          [IO.File]::WriteAllBytes('source-full.zip', $bytes)
+          $hash = (Get-FileHash source-full.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Source SHA256: $hash"
+          if ($hash -ne '028811a400f26c516ab7f4a4306299ffec72e75e3d9e2ebe141712f78c676655') { throw 'Source package SHA256 mismatch.' }
+          New-Item -ItemType Directory -Force fullsrc | Out-Null
+          Expand-Archive source-full.zip -DestinationPath fullsrc -Force
+          if (-not (Test-Path fullsrc/FVR.VMS.Etapa10.sln)) { throw 'Solution not found after extraction.' }
+
+      - name: Apply compiler fixes
+        shell: pwsh
+        run: |
+          $installer = @'
+          $ErrorActionPreference="Stop"
+          $Root=Split-Path -Parent $PSScriptRoot
+          $Release=Join-Path $Root "release"
+          if(-not(Test-Path $Release)){throw "Execute BUILD-APLICATIVO.cmd primeiro."}
+          $wix=Get-Command wix -ErrorAction SilentlyContinue
+          if(!$wix){
+              Write-Host "Instalando WiX CLI..." -ForegroundColor Yellow
+              dotnet tool install --global wix
+              $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          }
+          $Out=Join-Path $Root "installer\output";New-Item -ItemType Directory -Force -Path $Out|Out-Null
+          Push-Location (Join-Path $Root "installer")
+          try{wix build ".\FVR.VMS.Installer.wxs" -arch x64 -o (Join-Path $Out "FVR-VMS-4.0-Etapa10-x64.msi")}
+          finally{Pop-Location}
+          Write-Host "MSI criado em: $Out" -ForegroundColor Green
+          '@
+          [IO.File]::WriteAllText('fullsrc\scripts\Build-Installer.ps1',$installer,[Text.UTF8Encoding]::new($false))
+          python ./ci/apply_build_fixes.py fullsrc
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Verify .NET
+        shell: pwsh
+        run: dotnet --info
+
+      - name: Install FFmpeg
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Prepare FFmpeg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ff = Get-ChildItem 'C:\ProgramData\chocolatey\lib\ffmpeg\tools' -Filter ffmpeg.exe -File -Recurse | Where-Object { $_.FullName -notlike '*\chocolatey\bin\*' } | Select-Object -First 1
+          if ($null -eq $ff) { throw 'FFmpeg real executable not found after Chocolatey installation.' }
+          $dest = Join-Path $PWD 'fullsrc\src\FVR.Recording.Service\tools\ffmpeg.exe'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+          Copy-Item $ff.FullName $dest -Force
+          Write-Host "FFmpeg real: $($ff.FullName)"
+          Write-Host "FFmpeg copied: $dest"
+          & $dest -version | Select-Object -First 2
+
+      - name: Restore solution
+        shell: pwsh
+        working-directory: fullsrc
+        run: dotnet restore ./FVR.VMS.Etapa10.sln
+
+      - name: Build solution
+        shell: pwsh
+        working-directory: fullsrc
+        run: dotnet build ./FVR.VMS.Etapa10.sln -c Release --no-restore
+
+      - name: Publish Windows applications
+        shell: pwsh
+        working-directory: fullsrc
+        run: ./scripts/Build-Windows.ps1
+
+      - name: Build MSI
+        shell: pwsh
+        working-directory: fullsrc
+        run: ./scripts/Build-Installer.ps1
+
+      - name: Verify required outputs
+        shell: pwsh
+        working-directory: fullsrc
+        run: |
+          $required = @(
+            'release/Management-Service/FVR.Management.Service.exe',
+            'release/Recording-Service/FVR.Recording.Service.exe',
+            'release/Management-Console/FVR.Management.Console.exe',
+            'release/Monitoring-Client/FVR.Monitoring.Client.exe',
+            'release/Setup-Wizard/FVR.Setup.Wizard.exe',
+            'installer/output/FVR-VMS-4.0-Etapa10-x64.msi'
+          )
+          foreach ($p in $required) {
+            if (-not (Test-Path $p)) { throw "Missing required artifact: $p" }
+            Write-Host "$p => $((Get-Item $p).Length) bytes"
+          }
+
+      - name: Upload complete Windows release
+        uses: actions/upload-artifact@v4
+        with:
+          name: FVR-VMS-Etapa10-Full-win-x64
+          path: fullsrc/release/**
+          if-no-files-found: error
+
+      - name: Upload MSI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FVR-VMS-Etapa10-MSI-x64
+          path: fullsrc/installer/output/FVR-VMS-4.0-Etapa10-x64.msi
+          if-no-files-found: error
