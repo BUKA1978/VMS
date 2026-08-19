@@ -67,8 +67,16 @@ jobs:
 
       - name: Prepare FFmpeg
         shell: pwsh
-        working-directory: fullsrc
-        run: ./scripts/Prepare-FFmpeg.ps1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ff = Get-ChildItem 'C:\ProgramData\chocolatey\lib\ffmpeg\tools' -Filter ffmpeg.exe -File -Recurse | Where-Object { $_.FullName -notlike '*\chocolatey\bin\*' } | Select-Object -First 1
+          if ($null -eq $ff) { throw 'FFmpeg real executable not found after Chocolatey installation.' }
+          $dest = Join-Path $PWD 'fullsrc\src\FVR.Recording.Service\tools\ffmpeg.exe'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+          Copy-Item $ff.FullName $dest -Force
+          Write-Host "FFmpeg real: $($ff.FullName)"
+          Write-Host "FFmpeg copied: $dest"
+          & $dest -version | Select-Object -First 2
 
       - name: Restore solution
         shell: pwsh
