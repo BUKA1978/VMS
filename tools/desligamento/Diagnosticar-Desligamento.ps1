@@ -119,6 +119,7 @@ $todos | Sort-Object Data | Export-Csv -Path (Join-Path $Saida 'eventos-chave.cs
 # 2. Linha do tempo de cada desligamento
 # ---------------------------------------------------------------------------
 Titulo '2. Linha do tempo (cada desligamento e os 15 min anteriores)'
+$nBotao = 0
 $quedas = $todos | Where-Object { $_.Id -in 41, 6008, 1074 } | Sort-Object Data -Descending
 if (-not $quedas) {
     Escrever 'Nenhum desligamento registrado no periodo (41/6008/1074).' 'Green'
@@ -137,6 +138,7 @@ foreach ($q in ($quedas | Select-Object -First 15)) {
             if ($bc -ne 0) {
                 Escrever '    => Houve TELA AZUL antes do reinicio (veja secao 4 / minidump).' 'Red'
             } elseif ($d['PowerButtonTimestamp'] -and $d['PowerButtonTimestamp'] -ne '0') {
+                $nBotao++
                 Escrever '    => Botao de energia foi pressionado (desligamento manual forcado).' 'Red'
             } else {
                 Escrever '    => Sem tela azul e sem botao: tipico de QUEDA DE ENERGIA, fonte (PSU), superaquecimento ou travamento total.' 'Red'
@@ -162,7 +164,8 @@ foreach ($e in ($u | Select-Object -First 20)) {
     Escrever ("{0:dd/MM/yyyy HH:mm:ss}  tipo={1}  usuario={2}" -f $e.TimeCreated, $p[4], $p[6]) 'Yellow'
     Escrever ("    processo: {0}" -f $p[0])
     Escrever ("    motivo  : {0} {1}" -f $p[2], $p[5])
-    if ($p[0] -match 'TrustedInstaller|wuauclt|MoUsoCoreWorker|usoclient|svchost') { $achados.Add('WINDOWS UPDATE reiniciou a maquina (evento 1074 por ' + (Split-Path $p[0] -Leaf) + ').') }
+    if ($p[0] -match 'TrustedInstaller|wuauclt|MoUsoCoreWorker|usoclient|svchost' -or "$($p[2])" -match 'atualiza|update|upgrade') { $achados.Add('WINDOWS UPDATE reiniciou a maquina (evento 1074 por ' + (Split-Path $p[0] -Leaf) + ').') }
+    elseif ($p[0] -match 'TeamViewer|AnyDesk|rustdesk') { $achados.Add("Reinicio feito por acesso remoto ($(Split-Path ($p[0] -replace '\s*\(.*$', '') -Leaf)) em $($e.TimeCreated) - normal se alguem reiniciou de proposito.") }
     elseif ($p[0] -match 'winlogon|explorer|shutdown\.exe') { $achados.Add("Desligamento/reinicio manual ou por script (1074, usuario $($p[6])).") }
     else { $achados.Add("Programa solicitou desligamento: $($p[0]).") }
 }
@@ -277,12 +280,12 @@ foreach ($e in $app) { Escrever ("{0:dd/MM/yyyy HH:mm:ss}  {1}" -f $e.TimeCreate
 # Conclusao
 # ---------------------------------------------------------------------------
 Titulo 'DIAGNOSTICO'
-$n41 = ($todos | Where-Object Id -eq 41).Count
-$nBsod = ($todos | Where-Object Grupo -like 'BugCheck*').Count
+$n41 = @($todos | Where-Object Id -eq 41).Count - $nBotao
+$nBsod = @($todos | Where-Object Grupo -like 'BugCheck*').Count
 if ($n41 -gt 0 -and $nBsod -eq 0 -and -not ($todos | Where-Object Grupo -like 'WHEA*')) {
-    $achados.Insert(0, "Kernel-Power 41 ($n41x) sem tela azul nem WHEA: causa mais provavel e ENERGIA - queda de rede, nobreak/UPS, fonte (PSU) fraca/defeituosa, cabo/regua. Verificar nobreak e trocar fonte se repetir.")
+    $achados.Insert(0, "Kernel-Power 41 ($n41 vez(es), fora as do botao de energia) sem tela azul, sem WHEA e sem minidump: o PC apagou de uma vez. Causa mais provavel: ENERGIA (queda/oscilacao na tomada, sem nobreak, fonte/PSU fraca ou com defeito, cabo/regua) ou desligamento termico de hardware. Verificar nobreak, trocar a tomada/regua, medir temperatura com HWiNFO e testar outra fonte se repetir.")
 } elseif ($nBsod -gt 0) {
-    $achados.Insert(0, "Telas azuis ($nBsod x): analisar o minidump para achar o driver (rede, video, controladora, antivirus) e atualiza-lo.")
+    $achados.Insert(0, "Telas azuis ($nBsod vez(es)): analisar o minidump para achar o driver (rede, video, controladora, antivirus) e atualiza-lo.")
 }
 if ($achados.Count -eq 0) { $achados.Add('Nenhuma causa evidente no periodo. Aumente -Dias ou rode logo apos o proximo desligamento.') }
 $i = 1
