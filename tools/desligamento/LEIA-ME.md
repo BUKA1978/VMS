@@ -46,3 +46,21 @@ O log das alterações fica em `C:\ProgramData\FVR\`.
 - BIOS: **Restore on AC Power Loss = Power On**, para o servidor voltar sozinho depois de uma queda de energia.
 - Nobreak com autonomia suficiente. Se só aparece **41** sem BSOD e sem WHEA, a causa quase sempre é energia: nobreak, fonte ou rede elétrica.
 - Temperatura: limpar a poeira, conferir as ventoinhas e a pasta térmica. Use HWiNFO para monitorar.
+
+## 4. Religar sozinho depois de desligar
+
+Um PC desligado não executa nada, então quem religa tem que ser a BIOS ou outro aparelho da rede.
+
+1. **No servidor** (como Administrador):
+   ```powershell
+   .\Configurar-Religamento.ps1            # mostra como está
+   .\Configurar-Religamento.ps1 -Aplicar   # BIOS: After Power Loss = Power On e Wake on LAN = Automatic; placa de rede com Wake on Magic Packet
+   ```
+   Se a BIOS tiver senha, use `-SenhaBios "senha"`. O script mostra o MAC e o IP do servidor no final.
+2. **Num segundo PC sempre ligado na mesma rede**:
+   ```powershell
+   .\Vigiar-E-Religar.ps1 -Mac <MAC> -Ip <IP> -Instalar
+   ```
+   Ele faz ping no servidor a cada 30 s. Depois de 2 minutos sem resposta, envia o pacote Wake on LAN e registra tudo em `C:\ProgramData\FVR\vigia-religar.log`. O `-Desinstalar` remove a tarefa.
+
+Limitação: se a fonte entrar em proteção, nem a BIOS nem o Wake on LAN conseguem ligar o PC. Nesse caso só tirar e recolocar na tomada resolve; uma tomada inteligente pode fazer isso automaticamente. A solução definitiva é trocar a fonte.

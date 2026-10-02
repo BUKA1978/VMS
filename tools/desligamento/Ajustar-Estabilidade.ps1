@@ -90,7 +90,8 @@ Passo 'Desativar Inicializacao Rapida (Fast Startup)' {
 # --- Placas de rede ----------------------------------------------------------
 Passo 'Placas de rede: nao permitir que o Windows desligue para economizar energia' {
     foreach ($nic in (Get-NetAdapter -Physical -ErrorAction Stop)) {
-        Disable-NetAdapterPowerManagement -Name $nic.Name -NoRestart -ErrorAction SilentlyContinue
+        # So impede o Windows de desligar a placa; mantem Wake on LAN (usado por Configurar-Religamento.ps1).
+        Set-NetAdapterPowerManagement -Name $nic.Name -AllowComputerToTurnOffDevice Disabled -NoRestart -ErrorAction Stop
     }
 }
 
