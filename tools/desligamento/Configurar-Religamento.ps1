@@ -117,6 +117,14 @@ foreach ($nic in $nics) {
     Write-Host ("{0}: MAC={1}  IP={2}  WakeOnMagicPacket={3}" -f $nic.Name, $nic.MacAddress, $ip, $pm.WakeOnMagicPacket)
 }
 
+# O vigia no outro PC usa ping; o Firewall do Windows bloqueia ping por padrao.
+if ($Aplicar) {
+    if (-not (Get-NetFirewallRule -Name 'FVR-Permitir-Ping' -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -Name 'FVR-Permitir-Ping' -DisplayName 'FVR - Permitir ping (vigia de religamento)' -Protocol ICMPv4 -IcmpType 8 -Direction Inbound -Action Allow -Profile Any | Out-Null
+    }
+    Write-Host '[OK]   Firewall: ping liberado para o vigia' -ForegroundColor Green
+}
+
 # ---------------------------------------------------------------------------
 # 3. Proximo passo
 # ---------------------------------------------------------------------------
