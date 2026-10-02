@@ -94,27 +94,47 @@ if (-not $bios) {
 Write-Host ''
 Write-Host '== Placa de rede ==' -ForegroundColor Cyan
 $nics = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -eq '802.3' })
+
+# "Permitir que o computador desligue este dispositivo" e "Permitir que este dispositivo
+# ative o computador" ficam na WMI (o parametro -AllowComputerToTurnOffDevice nao existe
+# em todas as versoes do Windows).
+function Definir-EnergiaWmi($nic, [string]$classe, [bool]$valor) {
+    $id = "$($nic.PnPDeviceID)".ToUpper()
+    if (-not $id) { return }
+    Get-CimInstance -Namespace root/wmi -ClassName $classe -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceName.ToUpper().StartsWith($id) } |
+        ForEach-Object { Set-CimInstance -InputObject $_ -Property @{ Enable = $valor } -ErrorAction SilentlyContinue }
+}
+
+$candidatos = @()
 foreach ($nic in $nics) {
-    if ($Aplicar) {
-        try {
-            Set-NetAdapterPowerManagement -Name $nic.Name -WakeOnMagicPacket Enabled -NoRestart -ErrorAction Stop
-            # Mantem a placa sempre ligada com o Windows rodando; so acorda o PC quando desligado.
-            Set-NetAdapterPowerManagement -Name $nic.Name -AllowComputerToTurnOffDevice Disabled -NoRestart -ErrorAction SilentlyContinue
-            # Propriedades do driver Intel (nomes podem vir traduzidos)
-            foreach ($prop in 'Wake on Magic Packet', 'Shutdown Wake-On-Lan', 'Ativar no Magic Packet', 'Wake-On-LAN') {
-                Get-NetAdapterAdvancedProperty -Name $nic.Name -DisplayName "*$prop*" -ErrorAction SilentlyContinue | ForEach-Object {
-                    $v = $_.ValidDisplayValues | Where-Object { $_ -match 'Enabled|Habilitad|Ativad' } | Select-Object -First 1
-                    if ($v) { Set-NetAdapterAdvancedProperty -Name $nic.Name -DisplayName $_.DisplayName -DisplayValue $v -NoRestart -ErrorAction SilentlyContinue }
-                }
-            }
-            Write-Host "[OK]   $($nic.Name): Wake on Magic Packet ativado" -ForegroundColor Green
-        } catch {
-            Write-Host "[FALHA] $($nic.Name): $($_.Exception.Message)" -ForegroundColor Red
-        }
-    }
     $pm = Get-NetAdapterPowerManagement -Name $nic.Name -ErrorAction SilentlyContinue
+    $suporta = $pm -and "$($pm.WakeOnMagicPacket)" -ne 'Unsupported'
+    if ($Aplicar) {
+        Definir-EnergiaWmi $nic 'MSPower_DeviceEnable' $false
+        if ($suporta) {
+            try {
+                Set-NetAdapterPowerManagement -Name $nic.Name -WakeOnMagicPacket Enabled -NoRestart -ErrorAction Stop
+                Definir-EnergiaWmi $nic 'MSPower_DeviceWakeEnable' $true
+                # Propriedades avancadas do driver (nomes podem vir traduzidos)
+                foreach ($prop in '*Magic*', '*Wake-On-Lan*', '*Wake on LAN*', '*Pacote*') {
+                    Get-NetAdapterAdvancedProperty -Name $nic.Name -DisplayName $prop -ErrorAction SilentlyContinue | ForEach-Object {
+                        $v = $_.ValidDisplayValues | Where-Object { $_ -match 'Enabled|Habilitad|Ativad' } | Select-Object -First 1
+                        if ($v) { Set-NetAdapterAdvancedProperty -Name $nic.Name -DisplayName $_.DisplayName -DisplayValue $v -NoRestart -ErrorAction SilentlyContinue }
+                    }
+                }
+                Write-Host "[OK]   $($nic.Name): Wake on LAN ativado" -ForegroundColor Green
+            } catch {
+                Write-Host "[FALHA] $($nic.Name): $($_.Exception.Message)" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "[--]   $($nic.Name) ($($nic.InterfaceDescription)): nao suporta Wake on LAN - nao serve para religar." -ForegroundColor DarkGray
+        }
+        $pm = Get-NetAdapterPowerManagement -Name $nic.Name -ErrorAction SilentlyContinue
+    }
     $ip = (Get-NetIPAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
-    Write-Host ("{0}: MAC={1}  IP={2}  WakeOnMagicPacket={3}" -f $nic.Name, $nic.MacAddress, $ip, $pm.WakeOnMagicPacket)
+    Write-Host ("{0} ({1}): MAC={2}  IP={3}  WakeOnMagicPacket={4}" -f $nic.Name, $nic.InterfaceDescription, $nic.MacAddress, $ip, $pm.WakeOnMagicPacket)
+    if ($suporta) { $candidatos += $nic }
 }
 
 # O vigia no outro PC usa ping; o Firewall do Windows bloqueia ping por padrao.
@@ -128,13 +148,19 @@ if ($Aplicar) {
 # ---------------------------------------------------------------------------
 # 3. Proximo passo
 # ---------------------------------------------------------------------------
-$principal = $nics | Where-Object Status -eq 'Up' | Select-Object -First 1
-if (-not $principal) { $principal = $nics | Select-Object -First 1 }
+# Usa a placa que suporta Wake on LAN; entre elas, prefere a onboard (Intel) e conectada.
+$principal = $candidatos | Sort-Object @{ E = { $_.Status -ne 'Up' } }, @{ E = { $_.InterfaceDescription -notmatch 'Intel' } } | Select-Object -First 1
+if (-not $principal) {
+    Write-Host ''
+    Write-Host 'Nenhuma placa de rede com Wake on LAN encontrada. Use apenas a BIOS (After Power Loss) ou uma tomada inteligente.' -ForegroundColor Red
+    return
+}
 $ipPrincipal = if ($principal) { (Get-NetIPAddress -InterfaceIndex $principal.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress }
 Write-Host ''
 Write-Host 'Para religar automaticamente, rode em OUTRO PC sempre ligado da mesma rede:' -ForegroundColor Cyan
 Write-Host ("  powershell -ExecutionPolicy Bypass -File .\Vigiar-E-Religar.ps1 -Mac {0} -Ip {1} -Instalar" -f $principal.MacAddress, $ipPrincipal) -ForegroundColor White
 Write-Host ''
+Write-Host 'Se o Windows ainda mostrar WakeOnMagicPacket=Disabled, reinicie este PC uma vez.'
 Write-Host 'Teste: desligue este PC pelo menu Iniciar e veja se o outro PC o religa em ~2 minutos.'
 Write-Host 'ATENCAO: se a fonte (PSU) entrar em protecao, nem BIOS nem Wake on LAN conseguem ligar -' -ForegroundColor Yellow
 Write-Host '         so tirar e recolocar na tomada (ou uma tomada inteligente). A solucao definitiva e trocar a fonte.' -ForegroundColor Yellow
